@@ -95,5 +95,23 @@ Aplikasi penerjemah BISINDO (Bahasa Isyarat Indonesia) **dua arah** menggunakan 
 
 ---
 
+## ✅ Meeting Server - LIVE
+
+**Flask-SocketIO Video Meeting dengan BISINDO Recognition**
+
+```bash
+cd meeting
+python app.py
+```
+
+Akses: `http://localhost:5000` atau via Cloudflare tunnel
+
+**Features:**
+- Video relay via server (server-side processing)
+- BISINDO landmark extraction + prediction
+- Real-time letter detection (A-Z)
+- TTS pronunciation via gTTS
+- Multiple users in room
+
 **Last Updated**: 2026-06-18
-**Status**: Phase 0 - Starting Landmark-Based Approach
+**Status**: Phase 1 - Meeting MVP Working ✅
