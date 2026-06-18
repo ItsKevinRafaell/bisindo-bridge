@@ -1,0 +1,21 @@
+# BISINDO Two-Way Communication Bridge - Dependencies
+
+# Core ML
+tensorflow>=2.15.0
+keras>=2.15.0
+numpy>=1.24.0
+
+# Computer Vision
+opencv-python-headless>=4.8.0
+mediapipe>=0.10.0
+
+# Web UI
+streamlit>=1.30.0
+streamlit-webrtc>=0.47.0
+
+# Text-to-Speech
+gTTS>=2.4.0
+pydub>=0.25.0
+
+# Utilities
+Pillow>=10.0.0

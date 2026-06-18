@@ -1,0 +1,19 @@
+# BISINDO Bridge - Landmark-Based Requirements
+# Minimal dependencies - NO TensorFlow/GPU needed!
+
+# Core
+streamlit>=1.28.0
+
+# MediaPipe for hand landmark detection
+mediapipe>=0.10.0
+
+# OpenCV for video processing
+opencv-python>=4.8.0
+
+# ML/Science (lightweight - no TensorFlow!)
+numpy>=1.24.0
+pandas>=2.0.0
+scikit-learn>=1.3.0
+
+# Text-to-Speech
+gTTS>=2.3.0
