@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BISINDO Bridge</title>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+:root {
+  --primary: #3B82F6;
+  --primary-dark: #2563EB;
+  --accent: #8B5CF6;
+  --bg: #ffffff;
+  --surface: #F8FAFC;
+  --border: #E2E8F0;
+  --text: #0F172A;
+  --text-muted: #64748B;
+  --radius: 16px;
+  --shadow: 0 8px 32px rgba(0,0,0,0.08);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: 'Poppins', sans-serif;
+  background: linear-gradient(180deg, #F1F5F9 0%, #ffffff 100%);
+  color: var(--text);
+  min-height: 100vh;
+}
+.hero {
+  text-align: center;
+  padding: 80px 24px 40px;
+}
+.hero h1 {
+  font-size: 3rem;
+  font-weight: 800;
+  background: linear-gradient(135deg, var(--primary) 0%, var(--accent) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+.hero p { color: var(--text-muted); font-size: 1.1rem; margin-top: 12px; max-width: 540px; margin-left: auto; margin-right: auto; }
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 24px;
+  max-width: 1100px;
+  margin: 48px auto;
+  padding: 0 24px;
+}
+.card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 32px;
+  text-decoration: none;
+  color: var(--text);
+  transition: all 0.2s;
+  box-shadow: var(--shadow);
+  display: block;
+}
+.card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 16px 48px rgba(0,0,0,0.12);
+  border-color: var(--primary);
+}
+.card .icon { font-size: 2.4rem; margin-bottom: 12px; }
+.card h2 { font-size: 1.25rem; font-weight: 700; margin-bottom: 8px; }
+.card p { color: var(--text-muted); font-size: 0.95rem; line-height: 1.5; }
+.card .tag { display: inline-block; margin-top: 14px; padding: 4px 12px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; background: #DBEAFE; color: #1E40AF; }
+.card.disabled { opacity: 0.55; pointer-events: none; }
+footer { text-align: center; color: var(--text-muted); font-size: 0.85rem; padding: 40px 24px; }
+footer a { color: var(--primary); text-decoration: none; }
+</style>
+</head>
+<body>
+<section class="hero">
+  <h1>BISINDO Bridge</h1>
+  <p>Two-way Bahasa Isyarat Indonesia translator. Real-time gesture recognition using MediaPipe + Random Forest, trained on crowd-sourced data.</p>
+</section>
+
+<section class="cards">
+  <a class="card" href="/test.html">
+    <div class="icon">🧪</div>
+    <h2>Test Model</h2>
+    <p>Try the trained model live in your browser. No server, no signup. Best way to check accuracy.</p>
+    <span class="tag">works offline</span>
+  </a>
+
+  <a class="card" id="cardMeeting" href="#">
+    <div class="icon">📹</div>
+    <h2>Virtual Meeting</h2>
+    <p>Video call with live BISINDO letter recognition overlay. Requires the laptop server running.</p>
+    <span class="tag" id="meetingTag">checking…</span>
+  </a>
+
+  <a class="card" id="cardCapture" href="#">
+    <div class="icon">📥</div>
+    <h2>Contribute Data</h2>
+    <p>Help train the model by recording 2-hand gestures. Sends to the laptop CSV when server is up.</p>
+    <span class="tag" id="captureTag">checking…</span>
+  </a>
+</section>
+
+<footer>
+  <p>Open source · <a href="https://github.com/yourname/bisindo-bridge">GitHub</a> · Made with ❤️ for accessibility</p>
+</footer>
+
+<script type="module">
+import { LAPTOP_API_URL } from './config.js';
+
+const meeting = document.getElementById('cardMeeting');
+const capture = document.getElementById('cardCapture');
+const meetingTag = document.getElementById('meetingTag');
+const captureTag = document.getElementById('captureTag');
+
+async function probe() {
+  meeting.href = LAPTOP_API_URL + '/';
+  capture.href = './capture.html';
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 4000);
+    const r = await fetch(LAPTOP_API_URL + '/api/health', { signal: ctrl.signal });
+    clearTimeout(t);
+    if (r.ok) {
+      const data = await r.json();
+      meetingTag.textContent = `online · ${data.samples} samples`;
+      captureTag.textContent = 'online';
+    } else {
+      throw new Error('not ok');
+    }
+  } catch (e) {
+    meetingTag.textContent = 'laptop offline';
+    captureTag.textContent = 'offline';
+    meeting.classList.add('disabled');
+  }
+}
+probe();
+</script>
+</body>
+</html>

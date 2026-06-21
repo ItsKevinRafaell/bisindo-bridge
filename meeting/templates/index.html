@@ -3,407 +3,485 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BISINDO Meeting - Video Call with Gesture Recognition</title>
-    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <title>Teman Meeting Kamu</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
+        :root {
+            --primary: #3B82F6;
+            --primary-light: #60A5FA;
+            --primary-dark: #2563EB;
+            --bg: #ffffff;
+            --surface: #F8FAFC;
+            --surface-hover: #F1F5F9;
+            --border: #E2E8F0;
+            --text: #1E293B;
+            --text-muted: #64748B;
+            --success: #10B981;
+            --danger: #EF4444;
+            --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+            --shadow-md: 0 4px 12px rgba(0,0,0,0.08);
+            --shadow-lg: 0 8px 24px rgba(0,0,0,0.12);
+            --radius: 12px;
+            --radius-lg: 16px;
         }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
 
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-            color: #fff;
+            font-family: 'Poppins', sans-serif;
+            background: var(--bg);
+            color: var(--text);
             min-height: 100vh;
+            line-height: 1.5;
         }
 
-        .container {
-            max-width: 1400px;
-            margin: 0 auto;
-            padding: 20px;
-        }
+        .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
 
+        /* Header */
         header {
             text-align: center;
-            padding: 20px 0;
+            padding: 30px 0 20px;
+        }
+        .brand {
+            display: inline-flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 8px;
+        }
+        .brand-icon { font-size: 2rem; }
+        .brand-name {
+            font-size: 1.75rem;
+            font-weight: 700;
+            color: var(--text);
+        }
+        .brand-subtitle {
+            color: var(--text-muted);
+            font-size: 0.95rem;
         }
 
-        header h1 {
-            font-size: 2.5rem;
-            background: linear-gradient(90deg, #00d9ff, #00ff88);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            margin-bottom: 10px;
+        /* Join Form */
+        .join-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: calc(100vh - 200px);
+            padding: 20px;
         }
-
-        .join-form {
-            background: rgba(255,255,255,0.05);
-            border-radius: 16px;
-            padding: 30px;
-            max-width: 400px;
-            margin: 30px auto;
-            backdrop-filter: blur(10px);
-        }
-
-        .join-form input {
+        .join-card {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            box-shadow: var(--shadow-lg);
+            padding: 40px;
             width: 100%;
-            padding: 15px;
-            margin: 10px 0;
-            border: none;
-            border-radius: 8px;
-            background: rgba(255,255,255,0.1);
-            color: #fff;
+            max-width: 420px;
+        }
+        .join-card h2 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: 24px;
+            text-align: center;
+        }
+        .form-group {
+            margin-bottom: 16px;
+        }
+        .form-group label {
+            display: block;
+            font-size: 0.875rem;
+            font-weight: 500;
+            color: var(--text);
+            margin-bottom: 6px;
+        }
+        .form-group input {
+            width: 100%;
+            padding: 14px 16px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            font-family: 'Poppins', sans-serif;
             font-size: 1rem;
+            color: var(--text);
+            transition: all 0.2s;
         }
-
-        .join-form input:focus {
-            outline: 2px solid #00d9ff;
+        .form-group input:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(59,130,246,0.1);
         }
-
+        .form-group input::placeholder {
+            color: var(--text-muted);
+        }
         .btn {
             width: 100%;
-            padding: 15px;
+            padding: 14px 24px;
             border: none;
-            border-radius: 8px;
-            font-size: 1.1rem;
+            border-radius: var(--radius);
+            font-family: 'Poppins', sans-serif;
+            font-size: 1rem;
             font-weight: 600;
             cursor: pointer;
-            transition: all 0.3s;
+            transition: all 0.2s;
         }
-
         .btn-primary {
-            background: linear-gradient(90deg, #00d9ff, #00ff88);
-            color: #1a1a2e;
+            background: var(--primary);
+            color: #fff;
         }
-
         .btn-primary:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 30px rgba(0,217,255,0.3);
+            background: var(--primary-dark);
+            transform: translateY(-1px);
+            box-shadow: var(--shadow-md);
         }
 
-        .meeting-container {
-            display: none;
-            gap: 20px;
-        }
+        /* Meeting Container */
+        .meeting-container { display: none; }
+        .meeting-container.active { display: grid; grid-template-columns: 1fr 320px; gap: 20px; }
 
-        .meeting-container.active {
-            display: grid;
-            grid-template-columns: 1fr 350px;
-        }
-
-        .video-section {
+        /* Room Header */
+        .room-header {
             display: flex;
-            flex-direction: column;
-            gap: 15px;
+            justify-content: space-between;
+            align-items: center;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            padding: 12px 16px;
+            border-radius: var(--radius);
+            margin-bottom: 16px;
+        }
+        .room-info {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .room-label { color: var(--text-muted); font-size: 0.875rem; }
+        .room-id {
+            font-weight: 600;
+            color: var(--primary);
+            font-family: monospace;
+        }
+        .btn-copy {
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-size: 1rem;
+            padding: 4px 8px;
+            border-radius: 6px;
+            transition: background 0.2s;
+        }
+        .btn-copy:hover { background: var(--surface-hover); }
+        .btn-exit {
+            background: #fff;
+            border: 2px solid var(--danger);
+            color: var(--danger);
+            padding: 8px 16px;
+            border-radius: var(--radius);
+            font-weight: 600;
+            cursor: pointer;
+            font-family: 'Poppins', sans-serif;
+            transition: all 0.2s;
+        }
+        .btn-exit:hover {
+            background: var(--danger);
+            color: #fff;
         }
 
+        /* Video Section */
+        .video-section { display: flex; flex-direction: column; gap: 16px; }
+
+        /* Video Grid - Zoom/GMeet Style */
         .video-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 15px;
+            gap: 16px;
+            padding: 16px 0;
         }
+        .video-grid.single { grid-template-columns: 1fr; max-width: 900px; margin: 0 auto; width: 100%; }
+        .video-grid.two { grid-template-columns: repeat(2, 1fr); }
+        .video-grid.three { grid-template-columns: repeat(3, 1fr); }
+        .video-grid.four { grid-template-columns: repeat(2, 1fr); }
+        .video-grid.five { grid-template-columns: repeat(3, 1fr); }
+        .video-grid.six { grid-template-columns: repeat(3, 1fr); }
+        .video-grid.many { grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
 
         .video-card {
-            background: rgba(255,255,255,0.05);
-            border-radius: 12px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
             overflow: hidden;
             position: relative;
+            aspect-ratio: 4/3;
+            box-shadow: var(--shadow-sm);
         }
-
-        .video-card video {
+        .video-card video,
+        .video-card img {
             width: 100%;
-            height: 240px;
+            height: 100%;
             object-fit: cover;
             background: #000;
         }
-
-        .video-card canvas {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            pointer-events: none;
-        }
-
         .video-card .username {
             position: absolute;
-            bottom: 10px;
-            left: 10px;
-            background: rgba(0,0,0,0.7);
-            padding: 5px 10px;
-            border-radius: 4px;
-            font-size: 0.9rem;
-        }
-
-        .prediction-overlay {
-            position: absolute;
-            top: 10px;
-            right: 10px;
-            background: rgba(0,255,136,0.9);
-            padding: 8px 15px;
+            bottom: 12px;
+            left: 12px;
+            background: rgba(255,255,255,0.95);
+            color: var(--text);
+            padding: 6px 14px;
             border-radius: 20px;
-            font-size: 1.5rem;
-            font-weight: bold;
-            color: #1a1a2e;
+            font-size: 0.85rem;
+            font-weight: 500;
+            box-shadow: var(--shadow-md);
+        }
+        .video-card .prediction-overlay {
+            position: absolute;
+            top: 12px;
+            right: 12px;
+            background: var(--primary);
+            color: #fff;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 1.1rem;
+            font-weight: 600;
+            box-shadow: var(--shadow-md);
         }
 
-        .sidebar {
+        /* Control Bar */
+        .controls {
             display: flex;
-            flex-direction: column;
-            gap: 15px;
+            justify-content: center;
+            gap: 12px;
+            padding: 16px 0;
         }
+        .control-btn {
+            width: 52px;
+            height: 52px;
+            border-radius: 50%;
+            border: none;
+            cursor: pointer;
+            font-size: 1.3rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--surface);
+            color: var(--text);
+            transition: all 0.2s;
+        }
+        .control-btn:hover { background: var(--surface-hover); }
+        .control-btn.active { background: var(--primary); color: #fff; }
+        .control-btn.muted { background: #FEE2E2; color: var(--danger); }
 
+        /* Sidebar */
+        .sidebar { display: flex; flex-direction: column; gap: 16px; }
         .panel {
-            background: rgba(255,255,255,0.05);
-            border-radius: 12px;
-            padding: 20px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 16px;
         }
-
         .panel h3 {
-            margin-bottom: 15px;
-            color: #00d9ff;
-            font-size: 1rem;
+            color: var(--text);
+            font-weight: 600;
+            font-size: 0.95rem;
+            margin-bottom: 12px;
             display: flex;
             align-items: center;
             gap: 8px;
         }
 
+        /* Prediction */
         .prediction-history {
             display: flex;
             flex-wrap: wrap;
             gap: 8px;
-            min-height: 50px;
+            min-height: 40px;
         }
-
         .predicted-letter {
-            background: linear-gradient(135deg, #00d9ff, #00ff88);
-            color: #1a1a2e;
-            padding: 8px 15px;
-            border-radius: 8px;
-            font-weight: bold;
-            font-size: 1.2rem;
-            animation: pop 0.3s ease;
+            background: var(--primary);
+            color: #fff;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 0.9rem;
+        }
+        .confidence-bar {
+            width: 100%;
+            height: 6px;
+            background: var(--surface);
+            border-radius: 3px;
+            margin-top: 12px;
+            overflow: hidden;
+        }
+        .confidence-fill {
+            height: 100%;
+            background: var(--primary);
+            border-radius: 3px;
+            transition: width 0.3s;
         }
 
-        @keyframes pop {
-            0% { transform: scale(0); }
-            50% { transform: scale(1.2); }
-            100% { transform: scale(1); }
-        }
-
-        .users-list {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
-
+        /* Users List */
+        .users-list { display: flex; flex-direction: column; gap: 8px; }
         .user-item {
             display: flex;
             align-items: center;
             gap: 10px;
             padding: 8px;
-            background: rgba(255,255,255,0.05);
-            border-radius: 8px;
+            background: var(--surface);
+            border-radius: var(--radius);
         }
-
         .user-avatar {
             width: 32px;
             height: 32px;
             border-radius: 50%;
-            background: linear-gradient(135deg, #00d9ff, #00ff88);
+            background: var(--primary);
+            color: #fff;
             display: flex;
             align-items: center;
             justify-content: center;
-            font-weight: bold;
-            color: #1a1a2e;
+            font-weight: 600;
+            font-size: 0.875rem;
+        }
+        .user-name { flex: 1; font-size: 0.875rem; color: var(--text); }
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--success);
         }
 
+        /* Chat */
         .chat-messages {
-            height: 200px;
+            height: 180px;
             overflow-y: auto;
             display: flex;
             flex-direction: column;
             gap: 8px;
-            margin-bottom: 10px;
+            padding: 4px;
         }
-
         .chat-message {
-            padding: 8px 12px;
-            border-radius: 8px;
-            font-size: 0.9rem;
+            padding: 10px 14px;
+            border-radius: var(--radius);
+            font-size: 0.875rem;
+            max-width: 85%;
         }
-
         .chat-message.own {
-            background: rgba(0,217,255,0.2);
+            background: var(--primary);
+            color: #fff;
             align-self: flex-end;
         }
-
         .chat-message.other {
-            background: rgba(255,255,255,0.1);
+            background: var(--surface);
+            color: var(--text);
+            align-self: flex-start;
         }
-
         .chat-input-group {
             display: flex;
             gap: 8px;
+            margin-top: 12px;
         }
-
         .chat-input-group input {
             flex: 1;
-            padding: 10px;
-            border: none;
-            border-radius: 8px;
-            background: rgba(255,255,255,0.1);
-            color: #fff;
+            padding: 10px 14px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            font-family: 'Poppins', sans-serif;
+            font-size: 0.875rem;
         }
-
+        .chat-input-group input:focus {
+            outline: none;
+            border-color: var(--primary);
+        }
         .chat-input-group button {
-            padding: 10px 20px;
+            padding: 10px 16px;
+            background: var(--primary);
+            color: #fff;
             border: none;
-            border-radius: 8px;
-            background: #00d9ff;
-            color: #1a1a2e;
+            border-radius: var(--radius);
             font-weight: 600;
             cursor: pointer;
         }
 
-        .status-indicator {
-            display: inline-block;
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            margin-right: 5px;
+        /* Responsive */
+        @media (max-width: 900px) {
+            .meeting-container.active { grid-template-columns: 1fr; }
+            .sidebar { display: none; }
+            .video-grid.two,
+            .video-grid.four,
+            .video-grid.six { grid-template-columns: 1fr; }
         }
-
-        .status-indicator.online { background: #00ff88; }
-        .status-indicator.offline { background: #ff4757; }
-
-        .confidence-bar {
-            width: 100%;
-            height: 6px;
-            background: rgba(255,255,255,0.1);
-            border-radius: 3px;
-            margin-top: 5px;
-            overflow: hidden;
-        }
-
-        .confidence-fill {
-            height: 100%;
-            background: linear-gradient(90deg, #00d9ff, #00ff88);
-            border-radius: 3px;
-            transition: width 0.3s;
-        }
-
-        .controls {
-            display: flex;
-            gap: 10px;
-            margin-top: 15px;
-        }
-
-        .control-btn {
-            flex: 1;
-            padding: 12px;
-            border: none;
-            border-radius: 8px;
-            font-size: 0.9rem;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 5px;
-        }
-
-        .control-btn.active {
-            background: #ff4757;
-            color: white;
-        }
-
-        .control-btn:not(.active) {
-            background: rgba(255,255,255,0.1);
-            color: #fff;
-        }
-
-        .room-link {
-            background: rgba(255,255,255,0.1);
-            padding: 15px;
-            border-radius: 8px;
-            margin-bottom: 15px;
-            text-align: center;
-        }
-
-        .room-link code {
-            background: rgba(0,0,0,0.3);
-            padding: 5px 10px;
-            border-radius: 4px;
-            color: #00d9ff;
+        @media (max-width: 480px) {
+            .brand-name { font-size: 1.3rem; }
+            .join-card { padding: 24px; }
         }
     </style>
-</head>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"></head>
 <body>
     <div class="container">
         <header>
-            <h1>🤟 BISINDO Meeting</h1>
-            <p>Video call dengan pengenalan gestur bahasa isyarat real-time</p>
+            <div class="brand">
+                <span class="brand-icon"><i class="fas fa-users"></i></span>
+                <span class="brand-name">Teman Meeting Kamu</span>
+            </div>
+            <p class="brand-subtitle">Video call dengan BISINDO gesture recognition</p>
         </header>
 
         <!-- Join Form -->
-        <div class="join-form" id="joinForm">
-            <input type="text" id="username" placeholder="Nama Anda" value="">
-            <input type="text" id="roomId" placeholder="ID Room (kosongkan untuk buat baru)" value="">
-            <button class="btn btn-primary" onclick="joinMeeting()">Gabung Meeting</button>
+        <div class="join-container" id="joinForm">
+            <div class="join-card">
+                <h2>Gabung Meeting</h2>
+                <div class="form-group">
+                    <label for="username">Nama Anda</label>
+                    <input type="text" id="username" placeholder="Masukkan nama Anda" maxlength="30" required>
+                </div>
+                <div class="form-group">
+                    <label for="roomId">Room ID (opsional)</label>
+                    <input type="text" id="roomId" placeholder="Kosongkan untuk buat baru">
+                </div>
+                <button class="btn btn-primary" onclick="joinMeeting()">Gabung</button>
+            </div>
         </div>
 
         <!-- Meeting Interface -->
         <div class="meeting-container" id="meetingContainer">
             <div class="video-section">
-                <div class="video-grid">
-                    <div class="video-card" id="localVideoCard">
-                        <video id="localVideo" autoplay muted playsinline></video>
-                        <canvas id="localCanvas"></canvas>
+                <div class="room-header">
+                    <div class="room-info">
+                        <span class="room-label">Room:</span>
+                        <span class="room-id" id="currentRoom">-</span>
+                        <button class="btn-copy" onclick="copyRoomLink()" title="Copy link"><i class="fas fa-copy"></i></button>
+                    </div>
+                    <button class="btn-exit" onclick="exitMeeting()">Keluar</button>
+                </div>
+
+                <div class="video-grid" id="videoGrid">
+                    <div class="video-card" id="localCard">
+                        <video id="localVideo" autoplay playsinline muted></video>
                         <div class="username" id="localUsername">Anda</div>
                         <div class="prediction-overlay" id="predictionOverlay" style="display:none;"></div>
                     </div>
-                    <div class="video-card" id="remoteVideoCard">
-                        <video id="remoteVideo" autoplay playsinline></video>
-                        <div class="username">Partner</div>
-                    </div>
-                </div>
-
-                <div class="room-link">
-                    Room: <code id="currentRoom">-</code>
-                    <button onclick="copyRoomLink()" style="margin-left:10px; padding:5px 10px; border:none; border-radius:4px; background:#00d9ff; color:#1a1a2e; cursor:pointer;">Copy</button>
                 </div>
 
                 <div class="controls">
-                    <button class="control-btn active" id="cameraBtn" onclick="toggleCamera()">📹 Camera</button>
-                    <button class="control-btn active" id="micBtn" onclick="toggleMic()">🎤 Mic</button>
-                    <button class="control-btn" id="bisindoBtn" onclick="toggleBisindo()">🤟 BISINDO Mode</button>
+                    <button class="control-btn active" id="cameraBtn" onclick="toggleCamera()"><i class="fas fa-video"></i></button>
+                    <button class="control-btn active" id="micBtn" onclick="toggleMic()"><i class="fas fa-microphone"></i></button>
                 </div>
             </div>
 
             <div class="sidebar">
                 <div class="panel">
-                    <h3>🤟 Prediksi Huruf</h3>
+                    <h3><i class="fas fa-hands"></i> Prediksi</h3>
                     <div class="prediction-history" id="predictionHistory">
-                        <span style="color: rgba(255,255,255,0.5);">Akan muncul di sini...</span>
+                        <span style="color:var(--text-muted)">Akan muncul...</span>
                     </div>
                     <div class="confidence-bar">
-                        <div class="confidence-fill" id="confidenceFill" style="width: 0%;"></div>
-                    </div>
-                    <div id="confidenceText" style="font-size:0.8rem; margin-top:5px; color:rgba(255,255,255,0.7);"></div>
-                </div>
-
-                <div class="panel">
-                    <h3>👥 Participants</h3>
-                    <div class="users-list" id="usersList">
-                        <!-- Users will be added here -->
+                        <div class="confidence-fill" id="confidenceFill" style="width:0%"></div>
                     </div>
                 </div>
 
                 <div class="panel">
-                    <h3>💬 Chat</h3>
+                    <h3><i class="fas fa-users"></i> Participants (<span id="userCount">0</span>)</h3>
+                    <div class="users-list" id="usersList"></div>
+                </div>
+
+                <div class="panel">
+                    <h3><i class="fas fa-comment"></i> Chat</h3>
                     <div class="chat-messages" id="chatMessages"></div>
                     <div class="chat-input-group">
                         <input type="text" id="chatInput" placeholder="Ketik pesan..." onkeypress="if(event.key==='Enter')sendMessage()">
@@ -415,6 +493,7 @@
     </div>
 
     <link rel="icon" href="data:,">
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
     <script src="/static/js/meeting.js"></script>
 </body>
 </html>

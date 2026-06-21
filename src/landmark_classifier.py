@@ -40,7 +40,7 @@ class LandmarkClassifier:
         base_options = python.BaseOptions(model_asset_path=self._get_hand_model_path())
         options = vision.HandLandmarkerOptions(
             base_options=base_options,
-            running_mode=VisionTaskRunningMode.VIDEO,
+            running_mode=VisionTaskRunningMode.IMAGE,
             num_hands=1
         )
         self.hand_landmarker = vision.HandLandmarker.create_from_options(options)

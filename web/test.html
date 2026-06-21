@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BISINDO Test Model</title>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --primary: #3B82F6;
+  --primary-dark: #2563EB;
+  --bg: #ffffff;
+  --surface: #F8FAFC;
+  --border: #E2E8F0;
+  --text: #1E293B;
+  --text-muted: #64748B;
+  --success: #10B981;
+  --danger: #EF4444;
+  --radius: 12px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Poppins', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+.container { max-width: 1100px; margin: 0 auto; padding: 24px; }
+header { text-align: center; margin-bottom: 24px; }
+.brand { font-size: 1.6rem; font-weight: 700; }
+.subtitle { color: var(--text-muted); font-size: 0.9rem; margin-top: 4px; }
+
+.grid { display: grid; grid-template-columns: 1fr 360px; gap: 24px; }
+@media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+
+.video-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  position: relative;
+  aspect-ratio: 4/3;
+}
+.video-card video, .video-card canvas {
+  position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+  object-fit: cover;
+}
+.video-card canvas { pointer-events: none; }
+
+.prediction-overlay {
+  position: absolute; top: 16px; right: 16px;
+  background: rgba(255,255,255,0.95);
+  padding: 10px 18px; border-radius: 22px;
+  font-weight: 700; font-size: 2.2rem;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.1);
+  min-width: 80px; text-align: center;
+}
+
+.panel { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; margin-bottom: 16px; }
+.panel h3 { font-size: 0.95rem; margin-bottom: 12px; }
+
+.top3-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; font-size: 0.9rem; }
+.top3-row .letter { width: 32px; height: 32px; border-radius: 8px; background: var(--surface); display: flex; align-items: center; justify-content: center; font-weight: 700; }
+.top3-row .bar { flex: 1; height: 8px; background: var(--surface); border-radius: 4px; overflow: hidden; }
+.top3-row .bar-fill { height: 100%; background: var(--primary); }
+.top3-row .pct { width: 56px; text-align: right; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+
+.status { padding: 12px; border-radius: 8px; text-align: center; font-weight: 600; font-size: 0.9rem; }
+.status.loading { background: #FEF3C7; color: #92400E; }
+.status.ready { background: #DCFCE7; color: #166534; }
+.status.error { background: #FEE2E2; color: var(--danger); }
+.status.detecting { background: #DBEAFE; color: #1E40AF; }
+
+.controls { display: flex; gap: 10px; margin-top: 16px; }
+.btn { flex: 1; padding: 12px; border: none; border-radius: var(--radius); font-family: inherit; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+.btn-primary { background: var(--primary); color: #fff; }
+.btn-primary:hover { background: var(--primary-dark); }
+.btn-secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+
+.history { display: flex; flex-wrap: wrap; gap: 6px; min-height: 36px; }
+.history-chip { background: var(--primary); color: #fff; padding: 4px 10px; border-radius: 12px; font-weight: 600; font-size: 0.85rem; }
+
+.kbd { background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; font-family: monospace; font-size: 0.75rem; }
+.info { font-size: 0.85rem; color: var(--text-muted); line-height: 1.6; }
+.info code { background: var(--surface); padding: 2px 6px; border-radius: 4px; font-size: 0.8rem; }
+
+a.back { color: var(--primary); text-decoration: none; font-size: 0.9rem; }
+a.back:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div class="brand">🧪 BISINDO Test Model</div>
+    <div class="subtitle">Live inference in your browser — no server needed</div>
+    <p style="margin-top:8px"><a class="back" href="/">← Back to home</a></p>
+  </header>
+
+  <div class="grid">
+    <div>
+      <div class="video-card">
+        <video id="video" autoplay playsinline muted></video>
+        <canvas id="canvas"></canvas>
+        <div class="prediction-overlay" id="prediction">—</div>
+      </div>
+      <div class="controls">
+        <button class="btn btn-primary" id="btnStart">Start Camera</button>
+        <button class="btn btn-secondary" id="btnFreeze">Pause</button>
+      </div>
+      <div class="panel" style="margin-top:16px">
+        <div class="status loading" id="status">Loading model…</div>
+      </div>
+    </div>
+
+    <div>
+      <div class="panel">
+        <h3>Top 3 predictions</h3>
+        <div id="top3">
+          <div class="info">Waiting for hand…</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3>History</h3>
+        <div class="history" id="history">
+          <span style="color:var(--text-muted)">Akan muncul…</span>
+        </div>
+      </div>
+
+      <div class="panel info">
+        <strong>Tips:</strong><br>
+        • Tunjukkan 2 tangan ke kamera<br>
+        • Pencahayaan cukup<br>
+        • Jarak ~50cm dari kamera<br>
+        • Tekan <span class="kbd">P</span> untuk pause
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+<script type="module">
+import { HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/vision_bundle.mjs";
+
+const videoEl = document.getElementById('video');
+const canvasEl = document.getElementById('canvas');
+const ctx = canvasEl.getContext('2d');
+const statusEl = document.getElementById('status');
+const predictionEl = document.getElementById('prediction');
+const top3El = document.getElementById('top3');
+const historyEl = document.getElementById('history');
+
+let handLandmarker = null;
+let model = null;
+let scaler = null;
+let labels = null;
+let stream = null;
+let paused = false;
+let videoTs = 0;
+let lastLetter = '';
+let lastLetterTime = 0;
+
+const HAND_CONNECTIONS = [
+  [0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],
+  [5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],
+  [13,17],[17,18],[18,19],[19,20],[0,17]
+];
+
+function setStatus(cls, text) {
+  statusEl.className = 'status ' + cls;
+  statusEl.textContent = text;
+}
+
+async function loadModel() {
+  setStatus('loading', 'Loading TF.js model…');
+  try {
+    model = await tf.loadLayersModel('/models/model.json');
+    model.summary && console.log('Model loaded');
+    setStatus('loading', 'Loading scaler + labels…');
+    const [scalerRes, labelsRes] = await Promise.all([
+      fetch('/models/scaler.json').then(r => r.json()),
+      fetch('/models/labels.json').then(r => r.json()),
+    ]);
+    scaler = scalerRes;
+    labels = labelsRes;
+    console.log(`Scaler: ${scaler.mean.length} features, ${labels.length} classes`);
+  } catch (err) {
+    setStatus('error', 'Model load failed: ' + err.message);
+    throw err;
+  }
+}
+
+async function initMediaPipe() {
+  setStatus('loading', 'Loading MediaPipe HandLandmarker…');
+  const vision = await FilesetResolver.forVisionTasks(
+    'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm'
+  );
+  handLandmarker = await HandLandmarker.createFromOptions(vision, {
+    baseOptions: {
+      modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+      delegate: 'GPU'
+    },
+    runningMode: 'VIDEO',
+    numHands: 2
+  });
+}
+
+function landmarksToFeatures(results) {
+  if (!results.landmarks || results.landmarks.length === 0) return null;
+  const hand1 = results.landmarks[0];
+  const hand1Flat = [];
+  hand1.forEach(p => hand1Flat.push(p.x, p.y, p.z));
+  while (hand1Flat.length < 63) hand1Flat.push(0);
+  let hand2Flat = new Array(63).fill(0);
+  if (results.landmarks.length > 1) {
+    const hand2 = results.landmarks[1];
+    hand2.forEach(p => hand2Flat.push(p.x, p.y, p.z));
+    while (hand2Flat.length > 63) hand2Flat.pop();
+    while (hand2Flat.length < 63) hand2Flat.push(0);
+  }
+  return hand1Flat.concat(hand2Flat);
+}
+
+function scale(features) {
+  const out = new Array(features.length);
+  for (let i = 0; i < features.length; i++) {
+    out[i] = (features[i] - scaler.mean[i]) / scaler.scale[i];
+  }
+  return out;
+}
+
+async function predict(features) {
+  const xs = tf.tensor2d([features]);
+  const probs = model.predict(xs);
+  const arr = await probs.data();
+  xs.dispose();
+  probs.dispose();
+  return Array.from(arr);
+}
+
+function renderTop3(probs) {
+  const indexed = probs.map((p, i) => ({ letter: labels[i], p }));
+  indexed.sort((a, b) => b.p - a.p);
+  const top3 = indexed.slice(0, 3);
+  top3El.innerHTML = '';
+  for (const row of top3) {
+    const pct = (row.p * 100).toFixed(1);
+    const div = document.createElement('div');
+    div.className = 'top3-row';
+    div.innerHTML = `
+      <div class="letter">${row.letter}</div>
+      <div class="bar"><div class="bar-fill" style="width:${pct}%"></div></div>
+      <div class="pct">${pct}%</div>
+    `;
+    top3El.appendChild(div);
+  }
+  return top3[0];
+}
+
+function drawHand(landmarks, handIdx) {
+  const w = canvasEl.width, h = canvasEl.height;
+  const color = handIdx === 0 ? '#10B981' : '#F59E0B';
+  ctx.strokeStyle = color; ctx.lineWidth = 3;
+  for (const [s, e] of HAND_CONNECTIONS) {
+    const p1 = landmarks[s], p2 = landmarks[e];
+    if (!p1 || !p2) continue;
+    ctx.beginPath();
+    ctx.moveTo(p1.x * w, p1.y * h);
+    ctx.lineTo(p2.x * w, p2.y * h);
+    ctx.stroke();
+  }
+  ctx.fillStyle = color;
+  for (const p of landmarks) {
+    ctx.beginPath();
+    ctx.arc(p.x * w, p.y * h, 5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function pushHistory(letter) {
+  if (letter === lastLetter && Date.now() - lastLetterTime < 1500) return;
+  lastLetter = letter;
+  lastLetterTime = Date.now();
+  const chip = document.createElement('span');
+  chip.className = 'history-chip';
+  chip.textContent = letter;
+  historyEl.insertBefore(chip, historyEl.firstChild);
+  while (historyEl.children.length > 30) historyEl.removeChild(historyEl.lastChild);
+}
+
+async function loop() {
+  if (!handLandmarker || !model) return;
+  if (!paused && videoEl.readyState >= 2) {
+    videoTs += 33;
+    const results = handLandmarker.detectForVideo(videoEl, videoTs);
+    ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+    if (results.landmarks && results.landmarks.length > 0) {
+      results.landmarks.forEach((lms, i) => drawHand(lms, i));
+      const feats = landmarksToFeatures(results);
+      if (feats) {
+        const scaled = scale(feats);
+        const probs = await predict(scaled);
+        const top = renderTop3(probs);
+        if (top.p > 0.5) {
+          predictionEl.textContent = top.letter;
+          pushHistory(top.letter);
+          setStatus('detecting', `Detected: ${top.letter} (${(top.p * 100).toFixed(1)}%)`);
+        } else {
+          predictionEl.textContent = '?';
+          setStatus('ready', 'Hand detected — confidence low');
+        }
+      }
+    } else {
+      predictionEl.textContent = '—';
+      setStatus('ready', 'No hand detected');
+    }
+  }
+  requestAnimationFrame(loop);
+}
+
+document.getElementById('btnStart').onclick = async () => {
+  if (stream) return;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 640, height: 480, facingMode: 'user' }
+    });
+    videoEl.srcObject = stream;
+    await videoEl.play();
+    canvasEl.width = videoEl.videoWidth;
+    canvasEl.height = videoEl.videoHeight;
+    setStatus('ready', 'Camera ready — show hand');
+    loop();
+  } catch (err) {
+    setStatus('error', 'Camera error: ' + err.message);
+  }
+};
+
+document.getElementById('btnFreeze').onclick = () => {
+  paused = !paused;
+  document.getElementById('btnFreeze').textContent = paused ? 'Resume' : 'Pause';
+};
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'p' || e.key === 'P') {
+    document.getElementById('btnFreeze').click();
+  }
+});
+
+(async () => {
+  try {
+    await Promise.all([loadModel(), initMediaPipe()]);
+    setStatus('ready', 'Ready — click Start Camera');
+  } catch (err) {
+    console.error(err);
+  }
+})();
+</script>
+</body>
+</html>
