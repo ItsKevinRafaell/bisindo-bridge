@@ -171,6 +171,8 @@ def api_sample():
         return jsonify({'ok': False, 'error': 'hand1 must be numeric'}), 400
 
     append_row(letter, hand1, contributor, source='web')
+    total = sum(len(v) for v in training_data.values())
+    print(f"📥 [{contributor}] Letter {letter} → CSV written (total: {total} samples)")
     training_data.setdefault(letter, []).append({
         'landmarks': [hand1],
         'hand_count': 2,

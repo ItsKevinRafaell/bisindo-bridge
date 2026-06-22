@@ -328,14 +328,29 @@ async function initMediaPipe() {
   const vision = await FilesetResolver.forVisionTasks(
     'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm'
   );
-  handLandmarker = await HandLandmarker.createFromOptions(vision, {
-    baseOptions: {
-      modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
-      delegate: 'GPU'
-    },
-    runningMode: 'VIDEO',
-    numHands: 2
-  });
+  // Try GPU first, fallback to CPU
+  try {
+    handLandmarker = await HandLandmarker.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+        delegate: 'GPU'
+      },
+      runningMode: 'VIDEO',
+      numHands: 2
+    });
+    console.log('MediaPipe HandLandmarker loaded (GPU)');
+  } catch (gpuErr) {
+    console.warn('GPU delegate failed, falling back to CPU:', gpuErr);
+    handLandmarker = await HandLandmarker.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+        delegate: 'CPU'
+      },
+      runningMode: 'VIDEO',
+      numHands: 2
+    });
+    console.log('MediaPipe HandLandmarker loaded (CPU)');
+  }
 }
 
 const HAND_CONNECTIONS = [
@@ -414,6 +429,19 @@ async function probeLaptop() {
     btnStart.disabled = true;
   }
 }
+
+// Poll health endpoint every 10s to refresh progress counts
+setInterval(() => {
+  if (laptopOnline) {
+    apiFetch('/api/health', { signal: AbortSignal.timeout(3000) })
+      .then(r => r.json())
+      .then(data => {
+        Object.assign(counts, data.counts);
+        updateProgressList();
+      })
+      .catch(() => {});
+  }
+}, 10000);
 
 // Username modal
 function showModal() {
