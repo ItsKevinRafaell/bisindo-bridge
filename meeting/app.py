@@ -133,11 +133,13 @@ def train_page():
 
 @app.route('/api/health')
 def api_health():
+    counts = {l: len(training_data.get(l, [])) for l in LETTERS}
     return jsonify({
         'status': 'ok',
         'classifier': classifier is not None,
         'samples': sum(len(v) for v in training_data.values()),
         'target': TRAIN_TARGET,
+        'counts': counts,
     })
 
 
