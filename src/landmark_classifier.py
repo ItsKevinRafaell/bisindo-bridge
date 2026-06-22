@@ -12,6 +12,15 @@ from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
 
+class _DictLabelEncoder:
+    """Mock LabelEncoder for legacy label dicts saved as pickle."""
+    def __init__(self, classes):
+        self.classes_ = np.array(classes) if not isinstance(classes, np.ndarray) else classes
+
+    def inverse_transform(self, indices):
+        return self.classes_[np.asarray(indices)]
+
+
 class LandmarkClassifier:
     def __init__(self, model_path=None, scaler_path=None, label_path=None):
         self.model = None
@@ -33,7 +42,12 @@ class LandmarkClassifier:
             self.scaler = pickle.load(f)
 
         with open(label_path, 'rb') as f:
-            self.label_encoder = pickle.load(f)
+            raw = pickle.load(f)
+        # Handle both LabelEncoder objects and plain dicts (legacy format)
+        if isinstance(raw, dict):
+            self.label_encoder = _DictLabelEncoder(raw.get('classes', list(raw.keys())))
+        else:
+            self.label_encoder = raw
 
         # Initialize MediaPipe HandLandmarker
         from mediapipe.tasks.python.vision.core.vision_task_running_mode import VisionTaskRunningMode

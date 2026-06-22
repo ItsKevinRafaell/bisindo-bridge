@@ -289,9 +289,20 @@ function toggleCapture() {
 
 btnStart.onclick = toggleCapture;
 
+// Ngrok free tier butuh header ini supaya browser nggak kena interstitial warning page
+const NGROK_HEADERS = { 'ngrok-skip-browser-warning': 'true' };
+
+async function apiFetch(path, opts = {}) {
+  const headers = {
+    ...(opts.headers || {}),
+    ...NGROK_HEADERS,
+  };
+  return fetch(LAPTOP_API_URL + path, { ...opts, headers });
+}
+
 async function postSample(letter, hand1, hand2) {
   try {
-    await fetch(LAPTOP_API_URL + '/api/sample', {
+    await apiFetch('/api/sample', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ letter, hand1, hand2, contributor: username }),
@@ -385,7 +396,7 @@ async function probeLaptop() {
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 4000);
-    const r = await fetch(LAPTOP_API_URL + '/api/health', { signal: ctrl.signal });
+    const r = await apiFetch('/api/health', { signal: ctrl.signal });
     clearTimeout(t);
     if (r.ok) {
       const data = await r.json();
