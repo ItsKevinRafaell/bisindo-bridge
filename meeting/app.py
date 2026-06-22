@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from src.landmark_classifier import LandmarkClassifier
 
 # ---- Auto-push config ----
-AUTO_PUSH_THRESHOLD = 500  # push setiap 100 sample baru
+AUTO_PUSH_THRESHOLD = 500  # push setiap 500 sample baru
 PUSH_LOCK = threading.Lock()
 PUSH_STATE_FILE = os.path.join(os.path.dirname(__file__), '..', '.push_state.json')
 

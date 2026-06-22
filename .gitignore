@@ -33,3 +33,4 @@ node_modules/
 *.wav
 training_log_*.txt
 training_results.json
+backup-v1-image-based/dataset
