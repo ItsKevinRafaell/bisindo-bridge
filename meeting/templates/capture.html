@@ -120,13 +120,18 @@ header { text-align: center; padding: 20px 0; }
 .username-modal button:disabled { background: var(--border); cursor: not-allowed; }
 
 .kbd { background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; font-family: monospace; font-size: 0.75rem; }
+.hand-toggle-section { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; margin-top: 12px; }
+.hand-toggle { display: flex; gap: 8px; margin-top: 10px; }
+.hand-btn { flex: 1; padding: 10px; border: 2px solid var(--border); border-radius: 8px; background: var(--bg); font-weight: 600; font-size: 0.9rem; cursor: pointer; transition: all 0.15s; }
+.hand-btn:hover { border-color: var(--primary); color: var(--primary); }
+.hand-btn.active { background: var(--primary); color: #fff; border-color: var(--primary); }
 </style>
 </head>
 <body>
 <div class="container">
   <header>
     <div class="brand">📥 BISINDO Capture</div>
-    <div class="subtitle">Record 2-hand landmarks → contribute to the training set</div>
+    <div class="subtitle">Rekam landmark tangan → kontribusi ke dataset pelatihan BISINDO</div>
     <p style="margin-top:8px"><a href="/" style="color:var(--primary);text-decoration:none;font-size:0.9rem">← Back to home</a></p>
   </header>
 
@@ -141,6 +146,14 @@ header { text-align: center; padding: 20px 0; }
       <div class="letter-section">
         <h3 style="font-size:0.95rem">Pilih Huruf <span style="color:var(--text-muted);font-weight:400;font-size:0.8rem">(tekan A-Z)</span></h3>
         <div class="letter-grid" id="letterGrid"></div>
+      </div>
+
+      <div class="hand-toggle-section">
+        <h3 style="font-size:0.95rem">Jumlah Tangan</h3>
+        <div class="hand-toggle">
+          <button class="hand-btn active" id="btn1Hand">1 Tangan</button>
+          <button class="hand-btn" id="btn2Hands">2 Tangan</button>
+        </div>
       </div>
 
       <div class="controls">
@@ -204,6 +217,7 @@ let stream = null;
 let username = localStorage.getItem('bisindo_contributor') || '';
 let counts = Object.fromEntries(LETTERS.map(l => [l, 0]));
 let laptopOnline = false;
+let handMode = 1; // 1 or 2 hands
 
 function setStatus(cls, text) {
   statusBox.className = 'status ' + cls;
@@ -211,14 +225,13 @@ function setStatus(cls, text) {
 }
 
 function updateOverlay(handCount = 0) {
-  if (isCapturing && handCount === 2) {
-    overlay.textContent = `🖐 ${currentLetter}: ${counts[currentLetter]} captured (2 hands)`;
+  const needed = handMode;
+  const hasEnough = handCount >= needed;
+  if (isCapturing && hasEnough) {
+    overlay.textContent = `🖐 ${currentLetter}: ${counts[currentLetter]} captured (${handCount} hand${handCount > 1 ? 's' : ''})`;
     overlay.className = 'video-overlay capturing';
-  } else if (isCapturing && handCount === 1) {
-    overlay.textContent = `⚠ Capturing ${currentLetter} — perlu 2 tangan`;
-    overlay.className = 'video-overlay warning';
   } else if (isCapturing) {
-    overlay.textContent = `⚠ Capturing ${currentLetter} — arahkan 2 tangan`;
+    overlay.textContent = `⚠ Capturing ${currentLetter} — perlu ${needed} tangan (deteksi ${handCount})`;
     overlay.className = 'video-overlay warning';
   } else if (handCount > 0) {
     overlay.textContent = `${handCount} hand${handCount > 1 ? 's' : ''} detected`;
@@ -291,6 +304,23 @@ function toggleCapture() {
 
 btnStart.onclick = toggleCapture;
 
+// Hand mode toggle
+document.getElementById('btn1Hand').onclick = () => {
+  handMode = 1;
+  document.getElementById('btn1Hand').classList.add('active');
+  document.getElementById('btn2Hands').classList.remove('active');
+  // Restart MediaPipe with new hand count
+  handLandmarker = null;
+  initMediaPipe();
+};
+document.getElementById('btn2Hands').onclick = () => {
+  handMode = 2;
+  document.getElementById('btn2Hands').classList.add('active');
+  document.getElementById('btn1Hand').classList.remove('active');
+  handLandmarker = null;
+  initMediaPipe();
+};
+
 // Ngrok free tier butuh header ini supaya browser nggak kena interstitial warning page
 const NGROK_HEADERS = { 'ngrok-skip-browser-warning': 'true' };
 
@@ -330,7 +360,7 @@ async function initMediaPipe() {
         delegate: 'GPU'
       },
       runningMode: 'VIDEO',
-      numHands: 2
+      numHands: handMode
     });
     console.log('MediaPipe HandLandmarker loaded (GPU)');
   } catch (gpuErr) {
@@ -341,7 +371,7 @@ async function initMediaPipe() {
         delegate: 'CPU'
       },
       runningMode: 'VIDEO',
-      numHands: 2
+      numHands: handMode
     });
     console.log('MediaPipe HandLandmarker loaded (CPU)');
   }
@@ -383,20 +413,25 @@ async function loop() {
   const handCount = results.landmarks ? results.landmarks.length : 0;
   updateOverlay(handCount);
 
-  if (handCount === 2) {
-    drawHand(results.landmarks[0], '#10B981');
-    drawHand(results.landmarks[1], '#F59E0B');
+  if (handCount >= handMode) {
+    for (let i = 0; i < Math.min(handCount, 2); i++) {
+      drawHand(results.landmarks[i], i === 0 ? '#10B981' : '#F59E0B');
+    }
     const now = Date.now();
     if (isCapturing && now - lastCaptureTime > CAPTURE_INTERVAL_MS) {
       lastCaptureTime = now;
       const hand1 = []; results.landmarks[0].forEach(p => hand1.push(p.x, p.y, p.z));
-      const hand2 = []; results.landmarks[1].forEach(p => hand2.push(p.x, p.y, p.z));
-      postSample(currentLetter, hand1, hand2);
+      if (handMode === 2 && handCount >= 2) {
+        const hand2 = []; results.landmarks[1].forEach(p => hand2.push(p.x, p.y, p.z));
+        postSample(currentLetter, hand1, hand2);
+      } else {
+        postSample(currentLetter, hand1, []);
+      }
       counts[currentLetter]++;
       updateProgressList();
     }
-  } else if (handCount === 1) {
-    drawHand(results.landmarks[0], '#10B981');
+  } else {
+    if (handCount >= 1) drawHand(results.landmarks[0], '#10B981');
   }
   requestAnimationFrame(loop);
 }

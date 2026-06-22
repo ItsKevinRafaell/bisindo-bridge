@@ -87,8 +87,8 @@ def load_existing_training_data():
     print(f"✅ Loaded {valid} samples (skipped {skipped})")
 
 
-def append_row(letter, hand1, contributor, source):
-    """Append a single 67-col row to CSV_PATH. Returns row count for letter."""
+def append_row(letter, hand1, contributor, source, num_hands=2):
+    """Append a single 67-col row to CSV_PATH."""
     os.makedirs(DATA_DIR, exist_ok=True)
     file_exists = os.path.isfile(CSV_PATH)
 
@@ -103,7 +103,7 @@ def append_row(letter, hand1, contributor, source):
         'letter': letter,
         'image_path': f'{source}_{letter}_{next_idx}',
         'split': 'train',
-        'num_hands': 2,
+        'num_hands': num_hands,
         'contributor': contributor,
     }
     for i in range(21):
@@ -163,6 +163,7 @@ def api_sample():
 
     letter = (data.get('letter') or '').upper()
     hand1 = data.get('hand1') or []
+    hand2 = data.get('hand2') or []
     contributor = (data.get('contributor') or 'Anonymous').strip()[:40] or 'Anonymous'
 
     if letter not in LETTERS:
@@ -171,10 +172,16 @@ def api_sample():
         return jsonify({'ok': False, 'error': 'hand1 must be 63 floats'}), 400
     try:
         hand1 = [float(v) for v in hand1]
+        hand2 = [float(v) for v in hand2] if hand2 else []
     except (ValueError, TypeError):
         return jsonify({'ok': False, 'error': 'hand1 must be numeric'}), 400
 
-    append_row(letter, hand1, contributor, source='web')
+    # Determine actual hand count
+    hand_count = 1
+    if len(hand2) == 63:
+        hand_count = 2
+
+    append_row(letter, hand1, contributor, source='web', num_hands=hand_count)
     total = sum(len(v) for v in training_data.values())
     print(f"📥 [{contributor}] Letter {letter} → CSV written (total: {total} samples)")
     training_data.setdefault(letter, []).append({
