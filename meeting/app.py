@@ -131,6 +131,10 @@ def room(room_id):
 def train_page():
     return render_template('train.html')
 
+@app.route('/capture')
+def capture_page():
+    return render_template('capture.html')
+
 @app.route('/api/health')
 def api_health():
     counts = {l: len(training_data.get(l, [])) for l in LETTERS}
