@@ -12,6 +12,9 @@ optional server-side prediction in /predict_landmarks socket event.
 import os
 import csv
 import socket
+import subprocess
+import json
+import threading
 from flask import Flask, render_template, request, send_file, jsonify
 from flask_socketio import SocketIO, emit, join_room, leave_room
 from flask_cors import CORS
@@ -19,6 +22,59 @@ from flask_cors import CORS
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from src.landmark_classifier import LandmarkClassifier
+
+# ---- Auto-push config ----
+AUTO_PUSH_THRESHOLD = 100  # push setiap 100 sample baru
+PUSH_LOCK = threading.Lock()
+PUSH_STATE_FILE = os.path.join(os.path.dirname(__file__), '..', '.push_state.json')
+
+def _load_push_state():
+    if os.path.exists(PUSH_STATE_FILE):
+        with open(PUSH_STATE_FILE) as f:
+            return json.load(f)
+    return {'last_push_count': 0, 'last_push_time': None}
+
+def _save_push_state(state):
+    with open(PUSH_STATE_FILE, 'w') as f:
+        json.dump(state, f)
+
+def _try_auto_push(csv_path):
+    """Check & auto-push CSV if threshold reached."""
+    state = _load_push_state()
+    total_rows = 0
+    try:
+        with open(csv_path) as f:
+            total_rows = sum(1 for _ in f) - 1  # subtract header
+    except:
+        return
+
+    new_samples = total_rows - state['last_push_count']
+    if new_samples >= AUTO_PUSH_THRESHOLD:
+        with PUSH_LOCK:
+            # Re-check after acquiring lock
+            state = _load_push_state()
+            new_samples = total_rows - state['last_push_count']
+            if new_samples < AUTO_PUSH_THRESHOLD:
+                return
+            try:
+                repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+                # Stage CSV
+                subprocess.run(['git', '-C', repo_root, 'add', 'dataset/landmarks_captured_v2.csv'],
+                              capture_output=True, timeout=30)
+                # Commit
+                subprocess.run(['git', '-C', repo_root, 'commit', '-m',
+                              f'data: auto-commit {new_samples} new samples (total {total_rows})'],
+                              capture_output=True, timeout=30)
+                # Push
+                result = subprocess.run(['git', '-C', repo_root, 'push', 'origin', 'main'],
+                                      capture_output=True, timeout=60)
+                if result.returncode == 0:
+                    print(f'✅ Auto-pushed {new_samples} new samples to GitHub')
+                    _save_push_state({'last_push_count': total_rows, 'last_push_time': str(__import__("datetime").datetime.now())})
+                else:
+                    print(f'⚠️ Auto-push failed: {result.stderr.decode()}')
+            except Exception as e:
+                print(f'⚠️ Auto-push error: {e}')
 
 # ---- Config ----
 app = Flask(__name__)
@@ -35,7 +91,7 @@ MODEL_DIR = os.path.join(BASE_DIR, '..', 'models')
 CSV_PATH = os.path.join(DATA_DIR, 'landmarks_captured_v2.csv')
 
 LETTERS = list('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
-TRAIN_TARGET = 50000  # target samples per letter
+TRAIN_TARGET = 5000  # target samples per letter
 
 # In-memory state
 training_data = {}   # letter -> [{landmarks, hand_count, contributor, from_csv}]
@@ -116,6 +172,9 @@ def append_row(letter, hand1, contributor, source, num_hands=2):
         if not file_exists:
             writer.writeheader()
         writer.writerow(row)
+
+    # Auto-push if threshold reached
+    _try_auto_push(CSV_PATH)
 
 
 # ---- HTTP routes ----
