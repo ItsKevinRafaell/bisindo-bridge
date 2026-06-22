@@ -1,0 +1,16 @@
+[Unit]
+Description=BISINDO Bridge Flask Server
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/kevin/bisindo-bridge
+ExecStart=/usr/bin/python3 meeting/app.py
+Restart=on-failure
+RestartSec=5
+Environment=HOME=/home/kevin
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

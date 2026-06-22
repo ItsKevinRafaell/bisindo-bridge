@@ -1,0 +1,16 @@
+[Unit]
+Description=ngrok tunnel for BISINDO
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/kevin/.local/bin/ngrok http 5000 --log=stdout
+Restart=on-failure
+RestartSec=3
+Environment=HOME=/home/kevin
+# Log ke journal + file
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
