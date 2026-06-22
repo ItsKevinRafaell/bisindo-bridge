@@ -1,34 +1,32 @@
 #!/bin/bash
 # Setup BISINDO systemd services (run once)
+# Note: ngrok free tier doesn't work well with systemd (needs TUI).
+# Flask runs via systemd, ngrok via start-ngrok.sh (manual).
 set -e
 cd "$(dirname "$0")"
 
 echo "📋 Installing BISINDO systemd services..."
 
-# Link services
+# Only Flask via systemd (ngrok runs manually)
 ln -sf "$PWD/systemd/bisindo-server.service" ~/.config/systemd/user/bisindo-server.service
-ln -sf "$PWD/systemd/ngrok.service" ~/.config/systemd/user/ngrok.service
 
 # Reload systemd
 systemctl --user daemon-reload
 
 # Enable (auto-start on login)
 systemctl --user enable bisindo-server.service
-systemctl --user enable ngrok.service
 
 # Start now
 systemctl --user start bisindo-server.service
-systemctl --user start ngrok.service
 
 echo ""
-echo "✅ Services installed and started!"
+echo "✅ Flask server auto-starts on login!"
 echo ""
 echo "📊 Check status:"
 echo "  systemctl --user status bisindo-server"
-echo "  systemctl --user status ngrok"
 echo ""
-echo "🔗 Get ngrok URL:"
-echo "  curl -s http://127.0.0.1:4040/api/tunnels | jq -r '.tunnels[0].public_url'"
+echo "🔗 Start ngrok tunnel:"
+echo "  ./start-ngrok.sh"
 echo ""
-echo "🛑 Stop services:"
-echo "  systemctl --user stop bisindo-server ngrok"
+echo "🛑 Stop Flask:"
+echo "  systemctl --user stop bisindo-server"
