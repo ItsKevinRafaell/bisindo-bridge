@@ -226,14 +226,20 @@ let handMode = 1; // 1 or 2 hands
 // Performance: prevent overlapping inference
 let detecting = false;
 
-// Performance: batched capture via SocketIO
+// Display-only counter: tracks captures waiting for server confirmation
+// Prevents rollback race — server count is always authoritative, pending just shows "in-flight"
+let pendingCaptures = Object.fromEntries(LETTERS.map(l => [l, 0]));
+
+// SocketIO for real-time capture
 let socket = null;
-let captureQueue = [];
-const BATCH_SIZE = 5;  // send every 5 samples
 
 // Performance: throttle DOM updates
 let lastDomUpdate = 0;
 let pendingProgressUpdate = false;
+
+function getDisplayCount(letter) {
+  return (counts[letter] || 0) + (pendingCaptures[letter] || 0);
+}
 
 function setStatus(cls, text) {
   statusBox.className = 'status ' + cls;
@@ -243,8 +249,9 @@ function setStatus(cls, text) {
 function updateOverlay(handCount = 0) {
   const needed = handMode;
   const hasEnough = handCount >= needed;
+  const displayCount = getDisplayCount(currentLetter);
   if (isCapturing && hasEnough) {
-    overlay.textContent = `🖐 ${currentLetter}: ${counts[currentLetter]} captured (${handCount} hand${handCount > 1 ? 's' : ''})`;
+    overlay.textContent = `🖐 ${currentLetter}: ${displayCount} captured (${handCount} hand${handCount > 1 ? 's' : ''})`;
     overlay.className = 'video-overlay capturing';
   } else if (isCapturing) {
     overlay.textContent = `⚠ Capturing ${currentLetter} — perlu ${needed} tangan (deteksi ${handCount})`;
@@ -275,7 +282,7 @@ function renderProgressList() {
   // Build HTML string once, single DOM write (much faster than 26 createElement)
   let html = '';
   for (const l of LETTERS) {
-    const c = counts[l] || 0;
+    const c = getDisplayCount(l);
     const pct = Math.min(100, (c / TARGET) * 100);
     html += `<div class="progress-item">
       <span class="letter">${l}</span>
@@ -304,9 +311,10 @@ function initSocket() {
   });
 
   socket.on('captured', (data) => {
-    // ONLY update the specific letter that was captured — single source of truth
+    // Server confirms — set authoritative count, clear pending for this letter
     if (data.letter && data.count !== undefined) {
       counts[data.letter] = data.count;
+      pendingCaptures[data.letter] = 0;
       scheduleProgressUpdate();
     }
   });
@@ -328,26 +336,16 @@ function initSocket() {
   });
 }
 
-// Batch capture sender — flush queue via SocketIO
-function flushCaptureQueue() {
-  if (captureQueue.length === 0 || !socket || !socket.connected) return;
-  const batch = captureQueue.splice(0, BATCH_SIZE);
-  for (const sample of batch) {
-    socket.emit('capture_landmark', sample);
-  }
-}
-
-function enqueueCapture(letter, hand1, handCount) {
-  captureQueue.push({
+// Send capture directly via SocketIO (server confirms via 'captured' event)
+function sendCapture(letter, hand1, handCount) {
+  if (!socket || !socket.connected) return;
+  pendingCaptures[letter] = (pendingCaptures[letter] || 0) + 1;
+  socket.emit('capture_landmark', {
     letter,
     landmarks: [hand1],
     hand_count: handCount,
     contributor: username,
   });
-  // NO optimistic increment — wait for server 'captured' event (prevents rollback race)
-
-  // Flush immediately (not batched) for faster server confirmation
-  flushCaptureQueue();
 }
 
 // Letter buttons
@@ -502,7 +500,7 @@ function loop(now) {
       if (isCapturing && captureNow - lastCaptureTime >= CAPTURE_INTERVAL_MS) {
         lastCaptureTime = captureNow;
         const hand1 = []; results.landmarks[0].forEach(p => hand1.push(p.x, p.y, p.z));
-        enqueueCapture(currentLetter, hand1, Math.min(handCount, 2));
+        sendCapture(currentLetter, hand1, Math.min(handCount, 2));
       }
     } else {
       if (handCount >= 1) drawHand(results.landmarks[0], '#10B981');
