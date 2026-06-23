@@ -98,6 +98,7 @@ training_data = {}   # letter -> [{landmarks, hand_count, contributor, from_csv}
 rooms = {}
 train_users = {}
 contributor_stats = {}
+letter_counters = {}  # letter -> int (next index, avoids reading CSV every capture)
 classifier = None
 
 
@@ -120,6 +121,7 @@ def init_classifier():
 # ---- CSV load/save ----
 def load_existing_training_data():
     training_data.clear()
+    letter_counters.clear()
     if not os.path.exists(CSV_PATH):
         print(f"ℹ️  No CSV at {CSV_PATH}")
         return
@@ -137,23 +139,26 @@ def load_existing_training_data():
                     'from_csv': True,
                 })
                 contributor_stats[contributor] = contributor_stats.get(contributor, 0) + 1
+                # Track next index per letter (avoid reading CSV on every capture)
+                letter_counters[letter] = letter_counters.get(letter, 0) + 1
                 valid += 1
             except (ValueError, KeyError):
                 skipped += 1
-    print(f"✅ Loaded {valid} samples (skipped {skipped})")
+    print(f"✅ Loaded {valid} samples (skipped {skipped}) across {len(letter_counters)} letters")
 
+
+# Thread-safe counter for letter indices
+COUNTER_LOCK = threading.Lock()
 
 def append_row(letter, hand1, contributor, source, num_hands=2):
-    """Append a single 67-col row to CSV_PATH."""
+    """Append a single 67-col row to CSV_PATH. Fast: no CSV scan."""
     os.makedirs(DATA_DIR, exist_ok=True)
     file_exists = os.path.isfile(CSV_PATH)
 
-    next_idx = 0
-    if file_exists:
-        with open(CSV_PATH, 'r') as f:
-            for r in csv.DictReader(f):
-                if r['letter'] == letter:
-                    next_idx += 1
+    # Fast counter from memory (no CSV re-read)
+    with COUNTER_LOCK:
+        next_idx = letter_counters.get(letter, 0)
+        letter_counters[letter] = next_idx + 1
 
     row = {
         'letter': letter,
@@ -173,8 +178,8 @@ def append_row(letter, hand1, contributor, source, num_hands=2):
             writer.writeheader()
         writer.writerow(row)
 
-    # Auto-push if threshold reached
-    _try_auto_push(CSV_PATH)
+    # Auto-push in background thread (non-blocking)
+    threading.Thread(target=_try_auto_push, args=(CSV_PATH,), daemon=True).start()
 
 
 # ---- HTTP routes ----

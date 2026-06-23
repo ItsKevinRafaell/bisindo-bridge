@@ -187,13 +187,18 @@ header { text-align: center; padding: 20px 0; }
   </div>
 </div>
 
+<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 <script type="module">
 import { HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/vision_bundle.mjs";
 
-// Same-origin API (no tunnel needed — served directly from Flask server)
+// Same-origin API (served directly from Flask server)
 const LAPTOP_API_URL = window.location.origin;
 const TARGET = 5000;
-const CAPTURE_INTERVAL_MS = 100; // 10fps to avoid spamming
+
+// Performance: throttle intervals
+const DETECTION_INTERVAL_MS = 33;   // ~30fps detection (matches MediaPipe speed)
+const CAPTURE_INTERVAL_MS = 100;     // ~10fps capture (reasonable data rate)
+const DOM_UPDATE_INTERVAL_MS = 500;  // DOM refresh max 2x/sec (prevent jank)
 
 const videoEl = document.getElementById('video');
 const canvasEl = document.getElementById('canvas');
@@ -211,13 +216,24 @@ const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
 let currentLetter = 'A';
 let isCapturing = false;
 let lastCaptureTime = 0;
-let videoTs = 0;
 let handLandmarker = null;
 let stream = null;
 let username = localStorage.getItem('bisindo_contributor') || '';
 let counts = Object.fromEntries(LETTERS.map(l => [l, 0]));
 let laptopOnline = false;
 let handMode = 1; // 1 or 2 hands
+
+// Performance: prevent overlapping inference
+let detecting = false;
+
+// Performance: batched capture via SocketIO
+let socket = null;
+let captureQueue = [];
+const BATCH_SIZE = 5;  // send every 5 samples
+
+// Performance: throttle DOM updates
+let lastDomUpdate = 0;
+let pendingProgressUpdate = false;
 
 function setStatus(cls, text) {
   statusBox.className = 'status ' + cls;
@@ -242,19 +258,96 @@ function updateOverlay(handCount = 0) {
   }
 }
 
-function updateProgressList() {
-  progressList.innerHTML = '';
+function scheduleProgressUpdate() {
+  if (pendingProgressUpdate) return;
+  pendingProgressUpdate = true;
+  requestAnimationFrame(() => {
+    const now = Date.now();
+    if (now - lastDomUpdate >= DOM_UPDATE_INTERVAL_MS) {
+      renderProgressList();
+      lastDomUpdate = now;
+    }
+    pendingProgressUpdate = false;
+  });
+}
+
+function renderProgressList() {
+  // Build HTML string once, single DOM write (much faster than 26 createElement)
+  let html = '';
   for (const l of LETTERS) {
     const c = counts[l] || 0;
     const pct = Math.min(100, (c / TARGET) * 100);
-    const div = document.createElement('div');
-    div.className = 'progress-item';
-    div.innerHTML = `
+    html += `<div class="progress-item">
       <span class="letter">${l}</span>
       <div class="bar"><div class="bar-fill" style="width:${pct}%"></div></div>
       <span class="count">${c.toLocaleString()}/${TARGET.toLocaleString()}</span>
-    `;
-    progressList.appendChild(div);
+    </div>`;
+  }
+  progressList.innerHTML = html;
+}
+
+// SocketIO setup for real-time capture
+function initSocket() {
+  socket = io(LAPTOP_API_URL);
+
+  socket.on('connect', () => {
+    console.log('✅ SocketIO connected');
+    socket.emit('train_join');
+    laptopOnline = true;
+    btnStart.disabled = false;
+  });
+
+  socket.on('disconnect', () => {
+    console.log('❌ SocketIO disconnected');
+    laptopOnline = false;
+    setStatus('offline', 'Laptop offline — signal is aborted');
+  });
+
+  socket.on('captured', (data) => {
+    // Server confirms capture — update count from server truth
+    if (data.letter && data.count !== undefined) {
+      counts[data.letter] = data.count;
+      scheduleProgressUpdate();
+    }
+  });
+
+  socket.on('train_info', (data) => {
+    if (data.counts) {
+      Object.assign(counts, data.counts);
+      renderProgressList();
+    }
+    if (!laptopOnline) {
+      laptopOnline = true;
+      btnStart.disabled = false;
+      setStatus('idle', `Online · ${data.total?.toLocaleString() || 0} samples`);
+    }
+  });
+}
+
+// Batch capture sender — flush queue via SocketIO
+function flushCaptureQueue() {
+  if (captureQueue.length === 0 || !socket || !socket.connected) return;
+  const batch = captureQueue.splice(0, BATCH_SIZE);
+  // Send each in batch as individual socket emit (server already handles single)
+  for (const sample of batch) {
+    socket.emit('capture_landmark', sample);
+  }
+}
+
+function enqueueCapture(letter, hand1, handCount) {
+  captureQueue.push({
+    letter,
+    landmarks: [hand1],
+    hand_count: handCount,
+    contributor: username,
+  });
+  // Increment local count immediately for responsive UI
+  counts[letter] = (counts[letter] || 0) + 1;
+  scheduleProgressUpdate();
+
+  // Flush if batch is ready
+  if (captureQueue.length >= BATCH_SIZE) {
+    flushCaptureQueue();
   }
 }
 
@@ -275,7 +368,7 @@ function selectLetter(l) {
   isCapturing = false;
   btnStart.textContent = 'Start Capture';
   btnStart.classList.remove('active');
-  updateOverlay();
+  updateOverlay(0);
 }
 
 document.addEventListener('keydown', e => {
@@ -309,7 +402,6 @@ document.getElementById('btn1Hand').onclick = () => {
   handMode = 1;
   document.getElementById('btn1Hand').classList.add('active');
   document.getElementById('btn2Hands').classList.remove('active');
-  // Restart MediaPipe with new hand count
   handLandmarker = null;
   initMediaPipe();
 };
@@ -320,22 +412,6 @@ document.getElementById('btn2Hands').onclick = () => {
   handLandmarker = null;
   initMediaPipe();
 };
-
-// Ngrok free tier butuh header ini supaya browser nggak kena interstitial warning page
-const NGROK_HEADERS = { 'ngrok-skip-browser-warning': 'true' };
-
-async function postSample(letter, hand1, hand2) {
-  try {
-    await apiFetch('/api/sample', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ letter, hand1, hand2, contributor: username }),
-    });
-  } catch (e) {
-    laptopOnline = false;
-    setStatus('offline', 'Laptop offline');
-  }
-}
 
 async function initCamera() {
   stream = await navigator.mediaDevices.getUserMedia({
@@ -402,86 +478,76 @@ function drawHand(landmarks, color) {
   }
 }
 
-async function loop() {
-  if (!handLandmarker || !videoEl || videoEl.readyState < 2) {
-    requestAnimationFrame(loop);
-    return;
-  }
-  videoTs += 33;
-  const results = handLandmarker.detectForVideo(videoEl, videoTs);
-  ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
-  const handCount = results.landmarks ? results.landmarks.length : 0;
-  updateOverlay(handCount);
-
-  if (handCount >= handMode) {
-    for (let i = 0; i < Math.min(handCount, 2); i++) {
-      drawHand(results.landmarks[i], i === 0 ? '#10B981' : '#F59E0B');
-    }
-    const now = Date.now();
-    if (isCapturing && now - lastCaptureTime > CAPTURE_INTERVAL_MS) {
-      lastCaptureTime = now;
-      const hand1 = []; results.landmarks[0].forEach(p => hand1.push(p.x, p.y, p.z));
-      if (handMode === 2 && handCount >= 2) {
-        const hand2 = []; results.landmarks[1].forEach(p => hand2.push(p.x, p.y, p.z));
-        postSample(currentLetter, hand1, hand2);
-      } else {
-        postSample(currentLetter, hand1, []);
-      }
-      counts[currentLetter]++;
-      updateProgressList();
-    }
-  } else {
-    if (handCount >= 1) drawHand(results.landmarks[0], '#10B981');
-  }
+// ===== OPTIMIZED DETECTION LOOP =====
+function loop(now) {
   requestAnimationFrame(loop);
-}
 
-async function apiFetch(path, opts = {}) {
-  const headers = {
-    ...(opts.headers || {}),
-    ...NGROK_HEADERS,
-  };
-  return fetch(LAPTOP_API_URL + path, { ...opts, headers });
+  if (!handLandmarker || !videoEl || videoEl.readyState < 2) return;
+  if (now - (loop.lastDetectTs || 0) < DETECTION_INTERVAL_MS) return;
+  if (detecting) return; // previous inference still running
+  detecting = true;
+  loop.lastDetectTs = now;
+
+  try {
+    const ts = performance.now();
+    const results = handLandmarker.detectForVideo(videoEl, ts);
+    ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+    const handCount = results.landmarks ? results.landmarks.length : 0;
+    updateOverlay(handCount);
+
+    if (handCount >= handMode) {
+      for (let i = 0; i < Math.min(handCount, 2); i++) {
+        drawHand(results.landmarks[i], i === 0 ? '#10B981' : '#F59E0B');
+      }
+      const captureNow = Date.now();
+      if (isCapturing && captureNow - lastCaptureTime >= CAPTURE_INTERVAL_MS) {
+        lastCaptureTime = captureNow;
+        const hand1 = []; results.landmarks[0].forEach(p => hand1.push(p.x, p.y, p.z));
+        enqueueCapture(currentLetter, hand1, Math.min(handCount, 2));
+      }
+    } else {
+      if (handCount >= 1) drawHand(results.landmarks[0], '#10B981');
+    }
+  } finally {
+    detecting = false;
+  }
 }
+loop.lastDetectTs = 0;
 
 async function probeLaptop() {
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 4000);
-    const r = await apiFetch('/api/health', { signal: ctrl.signal });
+    const r = await fetch(LAPTOP_API_URL + '/api/health', { signal: ctrl.signal });
     clearTimeout(t);
     if (r.ok) {
-      // Check if response is actually JSON (ngrok interstitial returns HTML)
       const contentType = r.headers.get('content-type') || '';
       if (!contentType.includes('application/json')) {
-        throw new Error('Server returned non-JSON response (ngrok interstitial?)');
+        throw new Error('Server returned non-JSON response');
       }
       const data = await r.json();
       laptopOnline = true;
       setStatus('idle', `Online · ${data.samples.toLocaleString()} samples`);
-      // Sync counts
       if (data.counts) {
         Object.assign(counts, data.counts);
-        updateProgressList();
+        renderProgressList();
       }
     } else throw new Error(`HTTP ${r.status}`);
   } catch (e) {
     laptopOnline = false;
-    const msg = e.message || 'unknown';
-    console.error('probeLaptop failed:', msg);
-    setStatus('offline', `Laptop offline — ${msg}`);
+    setStatus('offline', `Laptop offline — ${e.message}`);
     btnStart.disabled = true;
   }
 }
 
-// Poll health endpoint every 10s to refresh progress counts
+// Poll health endpoint every 10s
 setInterval(() => {
-  if (laptopOnline) {
-    apiFetch('/api/health', { signal: AbortSignal.timeout(3000) })
+  if (laptopOnline && socket && socket.connected) {
+    fetch(LAPTOP_API_URL + '/api/health', { signal: AbortSignal.timeout(3000) })
       .then(r => r.json())
       .then(data => {
         Object.assign(counts, data.counts);
-        updateProgressList();
+        renderProgressList();
       })
       .catch(() => {});
   }
@@ -504,9 +570,10 @@ usernameSubmit.addEventListener('click', async () => {
   if (!username) return;
   localStorage.setItem('bisindo_contributor', username);
   hideModal();
+  initSocket();
   await Promise.all([initMediaPipe(), initCamera(), probeLaptop()]);
-  updateProgressList();
-  loop();
+  renderProgressList();
+  requestAnimationFrame(loop);
 });
 usernameInput.addEventListener('keypress', e => {
   if (e.key === 'Enter' && !usernameSubmit.disabled) usernameSubmit.click();
@@ -514,9 +581,10 @@ usernameInput.addEventListener('keypress', e => {
 
 if (username) {
   hideModal();
+  initSocket();
   await Promise.all([initMediaPipe(), initCamera(), probeLaptop()]);
-  updateProgressList();
-  loop();
+  renderProgressList();
+  requestAnimationFrame(loop);
 } else {
   showModal();
 }
