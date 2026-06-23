@@ -304,7 +304,7 @@ function initSocket() {
   });
 
   socket.on('captured', (data) => {
-    // Server confirms capture — update count from server truth
+    // ONLY update the specific letter that was captured — single source of truth
     if (data.letter && data.count !== undefined) {
       counts[data.letter] = data.count;
       scheduleProgressUpdate();
@@ -312,9 +312,13 @@ function initSocket() {
   });
 
   socket.on('train_info', (data) => {
-    if (data.counts) {
-      Object.assign(counts, data.counts);
-      renderProgressList();
+    // Only sync on first connect — don't overwrite during active capture (causes rollback)
+    if (!socket._synced) {
+      socket._synced = true;
+      if (data.counts) {
+        Object.assign(counts, data.counts);
+        renderProgressList();
+      }
     }
     if (!laptopOnline) {
       laptopOnline = true;
@@ -328,7 +332,6 @@ function initSocket() {
 function flushCaptureQueue() {
   if (captureQueue.length === 0 || !socket || !socket.connected) return;
   const batch = captureQueue.splice(0, BATCH_SIZE);
-  // Send each in batch as individual socket emit (server already handles single)
   for (const sample of batch) {
     socket.emit('capture_landmark', sample);
   }
@@ -341,14 +344,10 @@ function enqueueCapture(letter, hand1, handCount) {
     hand_count: handCount,
     contributor: username,
   });
-  // Increment local count immediately for responsive UI
-  counts[letter] = (counts[letter] || 0) + 1;
-  scheduleProgressUpdate();
+  // NO optimistic increment — wait for server 'captured' event (prevents rollback race)
 
-  // Flush if batch is ready
-  if (captureQueue.length >= BATCH_SIZE) {
-    flushCaptureQueue();
-  }
+  // Flush immediately (not batched) for faster server confirmation
+  flushCaptureQueue();
 }
 
 // Letter buttons
@@ -540,18 +539,8 @@ async function probeLaptop() {
   }
 }
 
-// Poll health endpoint every 10s
-setInterval(() => {
-  if (laptopOnline && socket && socket.connected) {
-    fetch(LAPTOP_API_URL + '/api/health', { signal: AbortSignal.timeout(3000) })
-      .then(r => r.json())
-      .then(data => {
-        Object.assign(counts, data.counts);
-        renderProgressList();
-      })
-      .catch(() => {});
-  }
-}, 10000);
+// No periodic health poll needed — server pushes 'captured' events via SocketIO
+// Initial sync happens on connect via 'train_info' (one-time only)
 
 // Username modal
 function showModal() {
