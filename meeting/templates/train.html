@@ -233,14 +233,13 @@
         let currentLetter = 'A';
         let capturedCount = {};
         let lastCaptureTime = 0;
-        let lastDetectionTime = 0;
         let videoEl, canvasEl, ctx;
         let handLandmarker = null;
         let animationId = null;
-        let videoTimestamp = 0;
+        let detecting = false; // prevent overlapping detectForVideo calls
 
-        const CAPTURE_INTERVAL = 5;     // 200fps capture (ULTRA BRUTEFORCE!)
-        const DETECTION_INTERVAL = 5;   // 200fps detection (ULTRA BRUTEFORCE!)
+        const CAPTURE_INTERVAL_MS = 50;     // ~20fps capture (optimal for socket + smooth UX)
+        const DETECTION_INTERVAL_MS = 33;   // ~30fps detection (matches MediaPipe video speed)
         const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
         const AUTO_SAVE_THRESHOLD = 2000; // Auto-save when letter reaches 2000 samples
         const COLLECTED_THRESHOLD = 20;
@@ -549,27 +548,24 @@
 
         // ===== DETECTION LOOP =====
         function startDetection() {
-            function detect() {
-                if (!handLandmarker || !videoEl || videoEl.readyState < 2) {
-                    animationId = requestAnimationFrame(detect);
-                    return;
-                }
-
-                const now = Date.now();
-                if (now - lastDetectionTime < DETECTION_INTERVAL) {
-                    animationId = requestAnimationFrame(detect);
-                    return;
-                }
-                lastDetectionTime = now;
-
-                videoTimestamp += 33; // Always increasing (~30fps)
-                const results = handLandmarker.detectForVideo(videoEl, videoTimestamp);
-
-                processResults(results);
+            let lastDetectTs = 0;
+            function detect(now) {
                 animationId = requestAnimationFrame(detect);
-            }
+                if (!handLandmarker || !videoEl || videoEl.readyState < 2) return;
+                if (now - lastDetectTs < DETECTION_INTERVAL_MS) return;
+                if (detecting) return; // previous inference still running
+                detecting = true;
+                lastDetectTs = now;
 
-            detect();
+                try {
+                    const ts = performance.now();
+                    const results = handLandmarker.detectForVideo(videoEl, ts);
+                    processResults(results);
+                } finally {
+                    detecting = false;
+                }
+            }
+            detect(0);
         }
 
         // ===== PROCESS RESULTS =====
@@ -588,7 +584,7 @@
                 // Auto-capture (throttled)
                 if (isCapturing) {
                     const now = Date.now();
-                    if (now - lastCaptureTime > CAPTURE_INTERVAL) {
+                    if (now - lastCaptureTime >= CAPTURE_INTERVAL_MS) {
                         lastCaptureTime = now;
 
                         // Extract landmarks for both hands
