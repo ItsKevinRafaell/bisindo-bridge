@@ -569,7 +569,7 @@ async function probeServer() {
 // (Cloudflare tunnels can drop idle websockets; HTTP is the reliable path)
 setInterval(() => {
   if (!serverOnline || !(socket && socket.connected)) probeServer();
-}, 15000);
+}, 5000);
 
 // Username modal
 function showModal() {
