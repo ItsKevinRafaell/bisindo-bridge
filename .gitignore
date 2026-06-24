@@ -34,3 +34,7 @@ node_modules/
 training_log_*.txt
 training_results.json
 backup-v1-image-based/dataset
+VPS_CREDENTIALS.md
+*.key
+*.pem
+.credentials*

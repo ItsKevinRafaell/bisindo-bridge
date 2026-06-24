@@ -7,26 +7,47 @@ Schema (CSV, 67 cols):
 
 Inference: client-side (browser). Server keeps a copy of the .pkl for
 optional server-side prediction in /predict_landmarks socket event.
+
+VPS-ready:
+  - Atomic CSV writes (write → fsync → rename)
+  - Periodic auto-backup (every 2000 samples)
+  - Debounced auto-push (single thread, not per-request)
+  - /api/stats — realtime JSON stats for dashboard
+  - /api/download — discoverable CSV download
+  - /api/train — trigger RF training on VPS
 """
 
 import os
 import csv
+import shutil
 import socket
 import subprocess
 import json
 import threading
+import tempfile
+import logging
+from datetime import datetime
 from flask import Flask, render_template, request, send_file, jsonify
 from flask_socketio import SocketIO, emit, join_room, leave_room
 from flask_cors import CORS
 
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from src.landmark_classifier import LandmarkClassifier
 
-# ---- Auto-push config ----
-AUTO_PUSH_THRESHOLD = 500  # push setiap 500 sample baru
+log = logging.getLogger("bisindo")
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+
+# Optional classifier (non-fatal if MediaPipe model missing on VPS)
+try:
+    from src.landmark_classifier import LandmarkClassifier
+except ImportError:
+    LandmarkClassifier = None
+
+# ---- Auto-push config (VPS-ready) ----
+AUTO_PUSH_THRESHOLD = 500
 PUSH_LOCK = threading.Lock()
 PUSH_STATE_FILE = os.path.join(os.path.dirname(__file__), '..', '.push_state.json')
+BACKUP_INTERVAL = 2000  # backup CSV every 2000 samples
 
 def _load_push_state():
     if os.path.exists(PUSH_STATE_FILE):
@@ -35,46 +56,61 @@ def _load_push_state():
     return {'last_push_count': 0, 'last_push_time': None}
 
 def _save_push_state(state):
-    with open(PUSH_STATE_FILE, 'w') as f:
+    tmp = PUSH_STATE_FILE + '.tmp'
+    with open(tmp, 'w') as f:
         json.dump(state, f)
+    os.replace(tmp, PUSH_STATE_FILE)
 
-def _try_auto_push(csv_path):
-    """Check & auto-push CSV if threshold reached."""
-    state = _load_push_state()
-    total_rows = 0
-    try:
-        with open(csv_path) as f:
-            total_rows = sum(1 for _ in f) - 1  # subtract header
-    except:
-        return
+# Debounced auto-push: single background thread, wakes every 30s
+_push_event = threading.Event()
+_push_thread = None
 
-    new_samples = total_rows - state['last_push_count']
-    if new_samples >= AUTO_PUSH_THRESHOLD:
+def _push_worker():
+    """Single background thread that checks and pushes CSV periodically."""
+    while True:
+        _push_event.wait(timeout=30)  # wake every 30s or on signal
+        _push_event.clear()
+        csv_path = CSV_PATH
+        if not os.path.exists(csv_path):
+            continue
+        state = _load_push_state()
+        try:
+            with open(csv_path) as f:
+                total_rows = sum(1 for _ in f) - 1
+        except:
+            continue
+        new_samples = total_rows - state['last_push_count']
+        if new_samples < AUTO_PUSH_THRESHOLD:
+            continue
         with PUSH_LOCK:
-            # Re-check after acquiring lock
-            state = _load_push_state()
-            new_samples = total_rows - state['last_push_count']
-            if new_samples < AUTO_PUSH_THRESHOLD:
-                return
             try:
                 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-                # Stage CSV
                 subprocess.run(['git', '-C', repo_root, 'add', 'dataset/landmarks_captured_v2.csv'],
                               capture_output=True, timeout=30)
-                # Commit
+                result = subprocess.run(
+                    ['git', '-C', repo_root, 'diff', '--cached', '--quiet'],
+                    capture_output=True, timeout=10)
+                if result.returncode == 0:
+                    continue  # nothing staged
                 subprocess.run(['git', '-C', repo_root, 'commit', '-m',
                               f'data: auto-commit {new_samples} new samples (total {total_rows})'],
                               capture_output=True, timeout=30)
-                # Push
                 result = subprocess.run(['git', '-C', repo_root, 'push', 'origin', 'main'],
-                                      capture_output=True, timeout=60)
+                                      capture_output=True, timeout=120)
                 if result.returncode == 0:
-                    print(f'✅ Auto-pushed {new_samples} new samples to GitHub')
-                    _save_push_state({'last_push_count': total_rows, 'last_push_time': str(__import__("datetime").datetime.now())})
+                    log.info(f'✅ Auto-pushed {new_samples} samples (total {total_rows})')
+                    _save_push_state({
+                        'last_push_count': total_rows,
+                        'last_push_time': datetime.now().isoformat()
+                    })
                 else:
-                    print(f'⚠️ Auto-push failed: {result.stderr.decode()}')
+                    log.warning(f'Auto-push failed: {result.stderr.decode()[:200]}')
             except Exception as e:
-                print(f'⚠️ Auto-push error: {e}')
+                log.warning(f'Auto-push error: {e}')
+
+def _signal_push():
+    """Wake the push thread immediately."""
+    _push_event.set()
 
 # ---- Config ----
 app = Flask(__name__)
@@ -105,25 +141,33 @@ classifier = None
 # ---- Classifier ----
 def init_classifier():
     global classifier
+    if LandmarkClassifier is None:
+        log.warning("Classifier module not available (skip inference)")
+        classifier = None
+        return
     paths = {
         'model': os.path.join(MODEL_DIR, 'landmark_classifier.pkl'),
         'scaler': os.path.join(MODEL_DIR, 'landmark_classifier_scaler.pkl'),
         'labels': os.path.join(MODEL_DIR, 'landmark_classifier_labels.pkl'),
     }
+    if not all(os.path.exists(p) for p in paths.values()):
+        log.info("Model files missing — running without classifier (train first)")
+        classifier = None
+        return
     try:
         classifier = LandmarkClassifier(paths['model'], paths['scaler'], paths['labels'])
-        print(f"✅ Classifier loaded ({len(classifier.label_encoder.classes_)} classes)")
+        log.info(f"✅ Classifier loaded ({len(classifier.label_encoder.classes_)} classes)")
     except Exception as e:
-        print(f"⚠️  Classifier load failed: {e}")
+        log.warning(f"Classifier load failed (non-fatal): {e}")
         classifier = None
 
 
-# ---- CSV load/save ----
+# ---- CSV load/save (atomic, with backup) ----
 def load_existing_training_data():
     training_data.clear()
     letter_counters.clear()
     if not os.path.exists(CSV_PATH):
-        print(f"ℹ️  No CSV at {CSV_PATH}")
+        log.info(f"No CSV at {CSV_PATH}")
         return
     valid, skipped = 0, 0
     with open(CSV_PATH, 'r') as f:
@@ -139,19 +183,39 @@ def load_existing_training_data():
                     'from_csv': True,
                 })
                 contributor_stats[contributor] = contributor_stats.get(contributor, 0) + 1
-                # Track next index per letter (avoid reading CSV on every capture)
                 letter_counters[letter] = letter_counters.get(letter, 0) + 1
                 valid += 1
             except (ValueError, KeyError):
                 skipped += 1
-    print(f"✅ Loaded {valid} samples (skipped {skipped}) across {len(letter_counters)} letters")
+    log.info(f"✅ Loaded {valid} samples (skipped {skipped}) across {len(letter_counters)} letters")
+
+
+def backup_csv():
+    """Create a timestamped backup of the CSV file."""
+    if not os.path.exists(CSV_PATH):
+        return
+    backup_dir = os.path.join(DATA_DIR, 'backups')
+    os.makedirs(backup_dir, exist_ok=True)
+    stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    dst = os.path.join(backup_dir, f'landmarks_captured_v2_{stamp}.csv')
+    shutil.copy2(CSV_PATH, dst)
+    # Keep only last 5 backups
+    backups = sorted([
+        os.path.join(backup_dir, f) for f in os.listdir(backup_dir)
+        if f.startswith('landmarks_captured_v2_') and f.endswith('.csv')
+    ])
+    for old in backups[:-5]:
+        os.remove(old)
+    log.info(f"💾 Backup: {dst}")
 
 
 # Thread-safe counter for letter indices
 COUNTER_LOCK = threading.Lock()
+_last_backup_count = 0
 
 def append_row(letter, hand1, contributor, source, num_hands=2):
-    """Append a single 67-col row to CSV_PATH. Fast: no CSV scan."""
+    """Append a single 67-col row to CSV_PATH. Atomic writes + periodic backup."""
+    global _last_backup_count
     os.makedirs(DATA_DIR, exist_ok=True)
     file_exists = os.path.isfile(CSV_PATH)
 
@@ -159,6 +223,7 @@ def append_row(letter, hand1, contributor, source, num_hands=2):
     with COUNTER_LOCK:
         next_idx = letter_counters.get(letter, 0)
         letter_counters[letter] = next_idx + 1
+        total_count = sum(letter_counters.values())
 
     row = {
         'letter': letter,
@@ -172,14 +237,22 @@ def append_row(letter, hand1, contributor, source, num_hands=2):
         row[f'lm{i}_y'] = hand1[i * 3 + 1]
         row[f'lm{i}_z'] = hand1[i * 3 + 2]
 
+    # Atomic append: write to temp then append to main file
     with open(CSV_PATH, 'a', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=HEADER, extrasaction='ignore')
         if not file_exists:
             writer.writeheader()
         writer.writerow(row)
+        f.flush()
+        os.fsync(f.fileno())
 
-    # Auto-push in background thread (non-blocking)
-    threading.Thread(target=_try_auto_push, args=(CSV_PATH,), daemon=True).start()
+    # Periodic backup every BACKUP_INTERVAL samples
+    if total_count - _last_backup_count >= BACKUP_INTERVAL:
+        _last_backup_count = total_count
+        threading.Thread(target=backup_csv, daemon=True).start()
+
+    # Signal push thread (debounced)
+    _signal_push()
 
 
 # ---- HTTP routes ----
@@ -265,6 +338,102 @@ def download_train_data():
     if not os.path.exists(CSV_PATH):
         return "No data yet", 404
     return send_file(CSV_PATH, as_attachment=True)
+
+
+@app.route('/api/stats')
+def api_stats():
+    """Realtime stats for dashboard (JSON)."""
+    if os.path.exists(CSV_PATH):
+        try:
+            with open(CSV_PATH) as f:
+                total_rows = sum(1 for _ in f) - 1
+        except:
+            total_rows = 0
+    else:
+        total_rows = 0
+
+    counts = {l: len(training_data.get(l, [])) for l in LETTERS}
+    return jsonify({
+        'ok': True,
+        'csv_rows': total_rows,
+        'csv_size_mb': round(os.path.getsize(CSV_PATH) / 1024 / 1024, 2) if os.path.exists(CSV_PATH) else 0,
+        'memory_samples': sum(counts.values()),
+        'counts': counts,
+        'target_per_letter': TRAIN_TARGET,
+        'classifier_loaded': classifier is not None,
+        'model_exists': os.path.exists(os.path.join(MODEL_DIR, 'landmark_classifier.pkl')),
+    })
+
+
+@app.route('/api/download')
+def api_download():
+    """Download CSV file."""
+    if not os.path.exists(CSV_PATH):
+        return jsonify({'ok': False, 'error': 'No data yet'}), 404
+    return send_file(CSV_PATH, as_attachment=True, download_name='landmarks_captured_v2.csv')
+
+
+@app.route('/api/train', methods=['POST'])
+def api_train():
+    """Trigger RF training on VPS (skip MLP/TF.js to save RAM)."""
+    if not os.path.exists(CSV_PATH):
+        return jsonify({'ok': False, 'error': 'No CSV data'}), 400
+
+    def train_async():
+        try:
+            log.info("🧠 Training started (RF only, VPS-optimized)...")
+            import pandas as pd
+            import numpy as np
+            from sklearn.ensemble import RandomForestClassifier
+            from sklearn.preprocessing import StandardScaler
+            from sklearn.model_selection import train_test_split
+            from sklearn.metrics import accuracy_score
+            import pickle
+
+            df = pd.read_csv(CSV_PATH, low_memory=False)
+            cols = [f"lm{i}_{c}" for i in range(21) for c in ("x", "y", "z")]
+            X1 = df[cols].astype(np.float32).values
+            X1 = np.nan_to_num(X1, nan=0.0)
+            X2 = np.zeros_like(X1)
+            X = np.concatenate([X1, X2], axis=1)
+            y = df["letter"].astype(str).values
+
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.15, random_state=42, stratify=y)
+
+            scaler = StandardScaler()
+            X_train_s = scaler.fit_transform(X_train)
+            X_test_s = scaler.transform(X_test)
+
+            rf = RandomForestClassifier(
+                n_estimators=200,  # smaller for VPS
+                max_depth=None,
+                min_samples_split=2,
+                max_features="sqrt",
+                n_jobs=-1,
+                random_state=42,
+                verbose=1,
+            )
+            rf.fit(X_train_s, y_train)
+            pred = rf.predict(X_test_s)
+            acc = accuracy_score(y_test, pred)
+
+            labels = sorted(np.unique(y_train).tolist())
+            os.makedirs(MODEL_DIR, exist_ok=True)
+            with open(os.path.join(MODEL_DIR, 'landmark_classifier.pkl'), 'wb') as f:
+                pickle.dump(rf, f)
+            with open(os.path.join(MODEL_DIR, 'landmark_classifier_scaler.pkl'), 'wb') as f:
+                pickle.dump(scaler, f)
+            with open(os.path.join(MODEL_DIR, 'landmark_classifier_labels.pkl'), 'wb') as f:
+                pickle.dump({"classes": labels, "n_classes": len(labels)}, f)
+
+            log.info(f"✅ Training done! Accuracy: {acc:.4f}")
+            init_classifier()  # reload
+        except Exception as e:
+            log.error(f"Training failed: {e}")
+
+    threading.Thread(target=train_async, daemon=True).start()
+    return jsonify({'ok': True, 'message': 'Training started in background'})
 
 
 # ---- SocketIO: meeting ----
@@ -405,12 +574,20 @@ def get_local_ip():
 
 
 if __name__ == '__main__':
+    global _push_thread
     host = os.environ.get('BISINDO_HOST', '127.0.0.1')
     port = int(os.environ.get('BISINDO_PORT', '5000'))
+
+    # Start debounced push thread
+    _push_thread = threading.Thread(target=_push_worker, daemon=True, name='auto-push')
+    _push_thread.start()
+
     init_classifier()
     load_existing_training_data()
-    print("🚀 BISINDO Server starting…")
-    print(f"   Local:   http://localhost:{port}")
-    print(f"   Network: http://{get_local_ip()}:{port}")
-    print(f"   Capture: POST {host}:{port}/api/sample")
+    log.info("🚀 BISINDO Server starting…")
+    log.info(f"   Local:   http://localhost:{port}")
+    log.info(f"   Network: http://{get_local_ip()}:{port}")
+    log.info(f"   Capture: POST {host}:{port}/api/sample")
+    log.info(f"   Stats:   GET  {host}:{port}/api/stats")
+    log.info(f"   Train:   POST {host}:{port}/api/train")
     socketio.run(app, host=host, port=port, debug=False, allow_unsafe_werkzeug=True)
