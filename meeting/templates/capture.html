@@ -170,8 +170,7 @@ header { text-align: center; padding: 20px 0; }
         <h3>Status</h3>
         <div class="status idle" id="statusBox">Connecting…</div>
         <p style="font-size:0.8rem;color:var(--text-muted);margin-top:8px">
-          Data dikirim ke laptop via <code>POST /api/sample</code>.
-          Hanya jalan kalau laptop server hidup.
+          Data dikirim ke server via <code>POST /api/sample</code>.
         </p>
       </div>
     </div>
@@ -191,8 +190,8 @@ header { text-align: center; padding: 20px 0; }
 <script type="module">
 import { HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/vision_bundle.mjs";
 
-// Same-origin API (served directly from Flask server)
-const LAPTOP_API_URL = window.location.origin;
+// Same-origin API (served directly from Flask server via Cloudflare tunnel)
+const SERVER_URL = window.location.origin;
 const TARGET = 5000;
 
 // Performance: throttle intervals
@@ -220,7 +219,7 @@ let handLandmarker = null;
 let stream = null;
 let username = localStorage.getItem('bisindo_contributor') || '';
 let counts = Object.fromEntries(LETTERS.map(l => [l, 0]));
-let laptopOnline = false;
+let serverOnline = false;
 let handMode = 1; // 1 or 2 hands
 
 // Performance: prevent overlapping inference
@@ -295,19 +294,19 @@ function renderProgressList() {
 
 // SocketIO setup for real-time capture
 function initSocket() {
-  socket = io(LAPTOP_API_URL);
+  socket = io(SERVER_URL);
 
   socket.on('connect', () => {
     console.log('✅ SocketIO connected');
     socket.emit('train_join');
-    laptopOnline = true;
+    serverOnline = true;
     btnStart.disabled = false;
   });
 
   socket.on('disconnect', () => {
     console.log('❌ SocketIO disconnected');
-    laptopOnline = false;
-    setStatus('offline', 'Laptop offline — signal is aborted');
+    serverOnline = false;
+    setStatus('offline', 'Server offline — signal is aborted');
   });
 
   socket.on('captured', (data) => {
@@ -328,24 +327,53 @@ function initSocket() {
         renderProgressList();
       }
     }
-    if (!laptopOnline) {
-      laptopOnline = true;
+    if (!serverOnline) {
+      serverOnline = true;
       btnStart.disabled = false;
       setStatus('idle', `Online · ${data.total?.toLocaleString() || 0} samples`);
     }
   });
 }
 
-// Send capture directly via SocketIO (server confirms via 'captured' event)
-function sendCapture(letter, hand1, handCount) {
-  if (!socket || !socket.connected) return;
+// Send capture: prefer SocketIO, fall back to HTTP POST /api/sample
+async function sendCapture(letter, hand1, handCount) {
+  if (!serverOnline) return;
   pendingCaptures[letter] = (pendingCaptures[letter] || 0) + 1;
-  socket.emit('capture_landmark', {
-    letter,
-    landmarks: [hand1],
-    hand_count: handCount,
-    contributor: username,
-  });
+
+  // Try SocketIO first (fastest + server confirms count)
+  if (socket && socket.connected) {
+    socket.emit('capture_landmark', {
+      letter,
+      landmarks: [hand1],
+      hand_count: handCount,
+      contributor: username,
+    });
+    return;
+  }
+
+  // Fallback: HTTP POST /api/sample (works through Cloudflare tunnel)
+  try {
+    const res = await fetch(SERVER_URL + '/api/sample', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        letter,
+        hand1,
+        hand2: [],
+        contributor: username,
+      }),
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    if (data.ok && data.count !== undefined) {
+      counts[letter] = data.count;
+      pendingCaptures[letter] = 0;
+      scheduleProgressUpdate();
+    }
+  } catch (err) {
+    console.warn('HTTP fallback failed:', err);
+    pendingCaptures[letter] = Math.max(0, (pendingCaptures[letter] || 0) - 1);
+  }
 }
 
 // Letter buttons
@@ -380,8 +408,8 @@ document.addEventListener('keydown', e => {
 });
 
 function toggleCapture() {
-  if (!laptopOnline) {
-    setStatus('offline', 'Laptop offline — cannot capture');
+  if (!serverOnline) {
+    setStatus('offline', 'Server offline — cannot capture');
     return;
   }
   isCapturing = !isCapturing;
@@ -500,6 +528,7 @@ function loop(now) {
       if (isCapturing && captureNow - lastCaptureTime >= CAPTURE_INTERVAL_MS) {
         lastCaptureTime = captureNow;
         const hand1 = []; results.landmarks[0].forEach(p => hand1.push(p.x, p.y, p.z));
+        // no await — fire-and-forget, HTTP fallback handles its own errors
         sendCapture(currentLetter, hand1, Math.min(handCount, 2));
       }
     } else {
@@ -511,19 +540,16 @@ function loop(now) {
 }
 loop.lastDetectTs = 0;
 
-async function probeLaptop() {
+async function probeServer() {
   try {
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 4000);
-    const r = await fetch(LAPTOP_API_URL + '/api/health', { signal: ctrl.signal });
+    const t = setTimeout(() => ctrl.abort(), 10000);  // 10s — tunnel latency buffer
+    const r = await fetch(SERVER_URL + '/api/health', { signal: ctrl.signal });
     clearTimeout(t);
     if (r.ok) {
-      const contentType = r.headers.get('content-type') || '';
-      if (!contentType.includes('application/json')) {
-        throw new Error('Server returned non-JSON response');
-      }
       const data = await r.json();
-      laptopOnline = true;
+      serverOnline = true;
+      btnStart.disabled = false;
       setStatus('idle', `Online · ${data.samples.toLocaleString()} samples`);
       if (data.counts) {
         Object.assign(counts, data.counts);
@@ -531,14 +557,19 @@ async function probeLaptop() {
       }
     } else throw new Error(`HTTP ${r.status}`);
   } catch (e) {
-    laptopOnline = false;
-    setStatus('offline', `Laptop offline — ${e.message}`);
+    serverOnline = false;
+    setStatus('offline', `Server offline — ${e.message}`);
     btnStart.disabled = true;
+    // Retry in 5s (tunnel may be warming up)
+    setTimeout(probeServer, 5000);
   }
 }
 
-// No periodic health poll needed — server pushes 'captured' events via SocketIO
-// Initial sync happens on connect via 'train_info' (one-time only)
+// Periodic health poll — keeps serverOnline accurate even if SocketIO drops
+// (Cloudflare tunnels can drop idle websockets; HTTP is the reliable path)
+setInterval(() => {
+  if (!serverOnline || !(socket && socket.connected)) probeServer();
+}, 15000);
 
 // Username modal
 function showModal() {
@@ -558,7 +589,7 @@ usernameSubmit.addEventListener('click', async () => {
   localStorage.setItem('bisindo_contributor', username);
   hideModal();
   initSocket();
-  await Promise.all([initMediaPipe(), initCamera(), probeLaptop()]);
+  await Promise.all([initMediaPipe(), initCamera(), probeServer()]);
   renderProgressList();
   requestAnimationFrame(loop);
 });
@@ -569,7 +600,7 @@ usernameInput.addEventListener('keypress', e => {
 if (username) {
   hideModal();
   initSocket();
-  await Promise.all([initMediaPipe(), initCamera(), probeLaptop()]);
+  await Promise.all([initMediaPipe(), initCamera(), probeServer()]);
   renderProgressList();
   requestAnimationFrame(loop);
 } else {
