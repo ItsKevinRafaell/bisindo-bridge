@@ -574,7 +574,6 @@ def get_local_ip():
 
 
 if __name__ == '__main__':
-    global _push_thread
     host = os.environ.get('BISINDO_HOST', '127.0.0.1')
     port = int(os.environ.get('BISINDO_PORT', '5000'))
 
