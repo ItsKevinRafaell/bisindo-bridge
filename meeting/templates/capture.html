@@ -195,8 +195,8 @@ const SERVER_URL = window.location.origin;
 const TARGET = 5000;
 
 // Performance: throttle intervals
-const DETECTION_INTERVAL_MS = 33;   // ~30fps detection (matches MediaPipe speed)
-const CAPTURE_INTERVAL_MS = 100;     // ~10fps capture (reasonable data rate)
+const DETECTION_INTERVAL_MS = 30;   // ~33fps detection (faster MediaPipe)
+const CAPTURE_INTERVAL_MS = 30;     // ~33fps capture (max speed, 3x faster)
 const DOM_UPDATE_INTERVAL_MS = 500;  // DOM refresh max 2x/sec (prevent jank)
 
 const videoEl = document.getElementById('video');
