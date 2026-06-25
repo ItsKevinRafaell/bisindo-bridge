@@ -107,6 +107,12 @@ def load_existing_training_data():
     with open(CSV_PATH, 'r') as f:
         for row in csv.DictReader(f):
             try:
+                # Skip rows with missing/None landmark values
+                if any(row.get(f'lm{i}_{c}') is None or row.get(f'lm{i}_{c}') == ''
+                       for i in range(21) for c in ('x', 'y', 'z')):
+                    skipped += 1
+                    continue
+
                 hand1 = [float(row[f'lm{i}_{c}']) for i in range(21) for c in ('x', 'y', 'z')]
                 letter = row['letter']
                 contributor = row.get('contributor') or 'Unknown'
