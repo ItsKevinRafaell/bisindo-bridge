@@ -38,3 +38,11 @@ VPS_CREDENTIALS.md
 *.key
 *.pem
 .credentials*
+dataset/landmarks_captured_v2.csv
+dataset/backups/
+dataset/.~lock.*
+.push_state.json
+.tunnel-url
+.server.pid
+meeting-server.log
+meeting-tunnel.log
