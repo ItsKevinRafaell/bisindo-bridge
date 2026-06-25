@@ -11,7 +11,7 @@ optional server-side prediction in /predict_landmarks socket event.
 VPS-ready:
   - Atomic CSV writes (write → fsync → rename)
   - Periodic auto-backup (every 2000 samples)
-  - Debounced auto-push (single thread, not per-request)
+  - CSV is NOT git-tracked (too large; use /api/download instead)
   - /api/stats — realtime JSON stats for dashboard
   - /api/download — discoverable CSV download
   - /api/train — trigger RF training on VPS
@@ -43,74 +43,8 @@ try:
 except ImportError:
     LandmarkClassifier = None
 
-# ---- Auto-push config (VPS-ready) ----
-AUTO_PUSH_THRESHOLD = 500
-PUSH_LOCK = threading.Lock()
-PUSH_STATE_FILE = os.path.join(os.path.dirname(__file__), '..', '.push_state.json')
+# ---- Backup config (VPS-ready) ----
 BACKUP_INTERVAL = 2000  # backup CSV every 2000 samples
-
-def _load_push_state():
-    if os.path.exists(PUSH_STATE_FILE):
-        with open(PUSH_STATE_FILE) as f:
-            return json.load(f)
-    return {'last_push_count': 0, 'last_push_time': None}
-
-def _save_push_state(state):
-    tmp = PUSH_STATE_FILE + '.tmp'
-    with open(tmp, 'w') as f:
-        json.dump(state, f)
-    os.replace(tmp, PUSH_STATE_FILE)
-
-# Debounced auto-push: single background thread, wakes every 30s
-_push_event = threading.Event()
-_push_thread = None
-
-def _push_worker():
-    """Single background thread that checks and pushes CSV periodically."""
-    while True:
-        _push_event.wait(timeout=30)  # wake every 30s or on signal
-        _push_event.clear()
-        csv_path = CSV_PATH
-        if not os.path.exists(csv_path):
-            continue
-        state = _load_push_state()
-        try:
-            with open(csv_path) as f:
-                total_rows = sum(1 for _ in f) - 1
-        except:
-            continue
-        new_samples = total_rows - state['last_push_count']
-        if new_samples < AUTO_PUSH_THRESHOLD:
-            continue
-        with PUSH_LOCK:
-            try:
-                repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-                subprocess.run(['git', '-C', repo_root, 'add', 'dataset/landmarks_captured_v2.csv'],
-                              capture_output=True, timeout=30)
-                result = subprocess.run(
-                    ['git', '-C', repo_root, 'diff', '--cached', '--quiet'],
-                    capture_output=True, timeout=10)
-                if result.returncode == 0:
-                    continue  # nothing staged
-                subprocess.run(['git', '-C', repo_root, 'commit', '-m',
-                              f'data: auto-commit {new_samples} new samples (total {total_rows})'],
-                              capture_output=True, timeout=30)
-                result = subprocess.run(['git', '-C', repo_root, 'push', 'origin', 'main'],
-                                      capture_output=True, timeout=120)
-                if result.returncode == 0:
-                    log.info(f'✅ Auto-pushed {new_samples} samples (total {total_rows})')
-                    _save_push_state({
-                        'last_push_count': total_rows,
-                        'last_push_time': datetime.now().isoformat()
-                    })
-                else:
-                    log.warning(f'Auto-push failed: {result.stderr.decode()[:200]}')
-            except Exception as e:
-                log.warning(f'Auto-push error: {e}')
-
-def _signal_push():
-    """Wake the push thread immediately."""
-    _push_event.set()
 
 # ---- Config ----
 app = Flask(__name__)
@@ -250,9 +184,6 @@ def append_row(letter, hand1, contributor, source, num_hands=2):
     if total_count - _last_backup_count >= BACKUP_INTERVAL:
         _last_backup_count = total_count
         threading.Thread(target=backup_csv, daemon=True).start()
-
-    # Signal push thread (debounced)
-    _signal_push()
 
 
 # ---- HTTP routes ----
@@ -576,10 +507,6 @@ def get_local_ip():
 if __name__ == '__main__':
     host = os.environ.get('BISINDO_HOST', '127.0.0.1')
     port = int(os.environ.get('BISINDO_PORT', '5000'))
-
-    # Start debounced push thread
-    _push_thread = threading.Thread(target=_push_worker, daemon=True, name='auto-push')
-    _push_thread.start()
 
     init_classifier()
     load_existing_training_data()
