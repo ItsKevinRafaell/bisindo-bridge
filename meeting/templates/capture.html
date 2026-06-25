@@ -195,9 +195,13 @@ const SERVER_URL = window.location.origin;
 const TARGET = 5000;
 
 // Performance: throttle intervals
-const DETECTION_INTERVAL_MS = 30;   // ~33fps detection (faster MediaPipe)
-const CAPTURE_INTERVAL_MS = 30;     // ~33fps capture (max speed, 3x faster)
+const DETECTION_INTERVAL_MS = 16;    // ~60fps detection (fast inference, cap = display refresh)
 const DOM_UPDATE_INTERVAL_MS = 500;  // DOM refresh max 2x/sec (prevent jank)
+
+// Smart capture: send if hand moved enough (burst) OR baseline interval elapsed (static pose).
+// Cuts redundant frames when hand is still → cleaner data + far fewer server writes.
+const CAPTURE_MOVE_THRESHOLD = 0.015; // landmark movement (Euclidean, normalized 0-1) to count as "moved"
+const CAPTURE_STATIC_MS = 100;        // when hand is still, send 1 frame every 100ms (~10fps baseline)
 
 const videoEl = document.getElementById('video');
 const canvasEl = document.getElementById('canvas');
@@ -218,6 +222,8 @@ let lastCaptureTime = 0;
 let handLandmarker = null;
 let stream = null;
 let username = localStorage.getItem('bisindo_contributor') || '';
+let lastHand1 = null;
+let lastStaticCaptureTime = 0;
 let counts = Object.fromEntries(LETTERS.map(l => [l, 0]));
 let serverOnline = false;
 let handMode = 1; // 1 or 2 hands
@@ -391,6 +397,8 @@ function selectLetter(l) {
     btn.classList.toggle('active', LETTERS[i] === l);
   });
   isCapturing = false;
+  lastHand1 = null;  // reset dedup state when switching letters
+  lastStaticCaptureTime = 0;
   btnStart.textContent = 'Start Capture';
   btnStart.classList.remove('active');
   updateOverlay(0);
@@ -413,6 +421,10 @@ function toggleCapture() {
     return;
   }
   isCapturing = !isCapturing;
+  if (isCapturing) {
+    lastHand1 = null;
+    lastStaticCaptureTime = 0;
+  }
   btnStart.textContent = isCapturing ? 'Stop Capture' : 'Start Capture';
   btnStart.classList.toggle('active', isCapturing);
   setStatus(isCapturing ? 'collecting' : 'idle',
@@ -525,11 +537,39 @@ function loop(now) {
         drawHand(results.landmarks[i], i === 0 ? '#10B981' : '#F59E0B');
       }
       const captureNow = Date.now();
-      if (isCapturing && captureNow - lastCaptureTime >= CAPTURE_INTERVAL_MS) {
-        lastCaptureTime = captureNow;
+      if (isCapturing) {
         const hand1 = []; results.landmarks[0].forEach(p => hand1.push(p.x, p.y, p.z));
-        // no await — fire-and-forget, HTTP fallback handles its own errors
-        sendCapture(currentLetter, hand1, Math.min(handCount, 2));
+
+        // Smart capture: send if hand moved enough OR baseline interval elapsed
+        let shouldCapture = false;
+        if (lastHand1) {
+          // Calculate Euclidean distance between current and previous landmarks
+          let distance = 0;
+          for (let i = 0; i < hand1.length; i++) {
+            distance += (hand1[i] - lastHand1[i]) ** 2;
+          }
+          distance = Math.sqrt(distance);
+
+          // Burst mode: hand moved enough
+          if (distance > CAPTURE_MOVE_THRESHOLD) {
+            shouldCapture = true;
+          }
+          // Static mode: baseline interval elapsed
+          else if (captureNow - lastStaticCaptureTime >= CAPTURE_STATIC_MS) {
+            shouldCapture = true;
+            lastStaticCaptureTime = captureNow;
+          }
+        } else {
+          // First frame, always capture
+          shouldCapture = true;
+          lastStaticCaptureTime = captureNow;
+        }
+
+        if (shouldCapture) {
+          lastHand1 = hand1;
+          // no await — fire-and-forget, HTTP fallback handles its own errors
+          sendCapture(currentLetter, hand1, Math.min(handCount, 2));
+        }
       }
     } else {
       if (handCount >= 1) drawHand(results.landmarks[0], '#10B981');
