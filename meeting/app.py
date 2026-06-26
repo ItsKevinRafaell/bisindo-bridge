@@ -26,6 +26,7 @@ import json
 import threading
 import tempfile
 import logging
+import atexit
 from datetime import datetime
 from flask import Flask, render_template, request, send_file, jsonify
 from flask_socketio import SocketIO, emit, join_room, leave_room
@@ -59,6 +60,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, '..', 'dataset')
 MODEL_DIR = os.path.join(BASE_DIR, '..', 'models')
 CSV_PATH = os.path.join(DATA_DIR, 'landmarks_captured_v2.csv')
+COUNTERS_PATH = os.path.join(DATA_DIR, 'counters.json')
 
 LETTERS = list('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
 TRAIN_TARGET = 5000  # target samples per letter
@@ -96,10 +98,52 @@ def init_classifier():
         classifier = None
 
 
+# ---- Counter persistence (survives restarts) ----
+def load_counters():
+    """Load counters from JSON file, fallback to CSV scan if missing."""
+    if os.path.exists(COUNTERS_PATH):
+        try:
+            with open(COUNTERS_PATH, 'r') as f:
+                saved = json.load(f)
+                for letter in LETTERS:
+                    letter_counters[letter] = saved.get(letter, 0)
+                log.info(f"✅ Counters loaded from {COUNTERS_PATH}")
+                return
+        except Exception as e:
+            log.warning(f"Failed to load counters: {e}")
+    # Fallback: counters stay 0, will be rebuilt from CSV by rebuild_counters.py
+
+def save_counters():
+    """Save current counters to JSON file."""
+    try:
+        with open(COUNTERS_PATH, 'w') as f:
+            json.dump(letter_counters, f)
+        log.info(f"💾 Counters saved to {COUNTERS_PATH}")
+    except Exception as e:
+        log.error(f"Failed to save counters: {e}")
+
+def rebuild_and_save_counters():
+    """Rebuild counters from CSV and save."""
+    letter_counters.clear()
+    if os.path.exists(CSV_PATH):
+        try:
+            with open(CSV_PATH, 'r') as f:
+                for row in csv.DictReader(f):
+                    letter = row.get('letter', '').upper()
+                    if letter in LETTERS:
+                        letter_counters[letter] = letter_counters.get(letter, 0) + 1
+        except Exception as e:
+            log.error(f"Counter rebuild failed: {e}")
+    save_counters()
+
+# Save counters on server exit
+atexit.register(save_counters)
+
 # ---- CSV load/save (atomic, with backup) ----
 def load_existing_training_data():
     training_data.clear()
-    letter_counters.clear()
+    # Don't clear counters - loaded from counters.json via load_counters()
+    load_counters()
     if not os.path.exists(CSV_PATH):
         log.info(f"No CSV at {CSV_PATH}")
         return
@@ -185,6 +229,10 @@ def append_row(letter, hand1, contributor, source, num_hands=2):
         writer.writerow(row)
         f.flush()
         os.fsync(f.fileno())
+
+    # Save counters to JSON (every 10 samples to reduce I/O)
+    if next_idx % 10 == 0:
+        threading.Thread(target=save_counters, daemon=True).start()
 
     # Periodic backup every BACKUP_INTERVAL samples
     if total_count - _last_backup_count >= BACKUP_INTERVAL:

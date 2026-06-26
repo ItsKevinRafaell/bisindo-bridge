@@ -38,6 +38,7 @@ VPS_CREDENTIALS.md
 *.pem
 .credentials*
 dataset/backups/
+dataset/counters.json
 dataset/.~lock.*
 .push_state.json
 .tunnel-url
