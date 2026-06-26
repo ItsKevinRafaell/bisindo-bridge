@@ -98,32 +98,17 @@ def init_classifier():
         classifier = None
 
 
-# ---- Counter persistence (survives restarts) ----
-def load_counters():
-    """Load counters from JSON file, fallback to CSV scan if missing."""
-    if os.path.exists(COUNTERS_PATH):
-        try:
-            with open(COUNTERS_PATH, 'r') as f:
-                saved = json.load(f)
-                for letter in LETTERS:
-                    letter_counters[letter] = saved.get(letter, 0)
-                log.info(f"✅ Counters loaded from {COUNTERS_PATH}")
-                return
-        except Exception as e:
-            log.warning(f"Failed to load counters: {e}")
-    # Fallback: counters stay 0, will be rebuilt from CSV by rebuild_counters.py
-
+# ---- Counter persistence ----
 def save_counters():
-    """Save current counters to JSON file."""
+    """Save current counters to JSON file (for debugging/monitoring)."""
     try:
         with open(COUNTERS_PATH, 'w') as f:
-            json.dump(letter_counters, f)
-        log.info(f"💾 Counters saved to {COUNTERS_PATH}")
+            json.dump(letter_counters, f, indent=2)
     except Exception as e:
         log.error(f"Failed to save counters: {e}")
 
-def rebuild_and_save_counters():
-    """Rebuild counters from CSV and save."""
+def rebuild_counters():
+    """Rebuild counters from CSV. Call this if counters get out of sync."""
     letter_counters.clear()
     if os.path.exists(CSV_PATH):
         try:
@@ -135,15 +120,12 @@ def rebuild_and_save_counters():
         except Exception as e:
             log.error(f"Counter rebuild failed: {e}")
     save_counters()
-
-# Save counters on server exit
-atexit.register(save_counters)
+    return letter_counters
 
 # ---- CSV load/save (atomic, with backup) ----
 def load_existing_training_data():
     training_data.clear()
-    # Don't clear counters - loaded from counters.json via load_counters()
-    load_counters()
+    letter_counters.clear()  # Always rebuild from CSV
     if not os.path.exists(CSV_PATH):
         log.info(f"No CSV at {CSV_PATH}")
         return
@@ -172,6 +154,7 @@ def load_existing_training_data():
             except (ValueError, KeyError):
                 skipped += 1
     log.info(f"✅ Loaded {valid} samples (skipped {skipped}) across {len(letter_counters)} letters")
+    save_counters()  # Save accurate counters
 
 
 def backup_csv():
@@ -259,7 +242,7 @@ def capture_page():
 
 @app.route('/api/health')
 def api_health():
-    counts = {l: len(training_data.get(l, [])) for l in LETTERS}
+    counts = {l: letter_counters.get(l, 0) for l in LETTERS}
     return jsonify({
         'status': 'ok',
         'classifier': classifier is not None,
@@ -315,7 +298,7 @@ def api_sample():
     contributor_stats[contributor] = contributor_stats.get(contributor, 0) + 1
     socketio.emit('train_info', get_train_info())
 
-    return jsonify({'ok': True, 'letter': letter, 'count': len(training_data[letter])})
+    return jsonify({'ok': True, 'letter': letter, 'count': letter_counters.get(letter, 0)})
 
 
 @app.route('/train/download')
@@ -337,7 +320,7 @@ def api_stats():
     else:
         total_rows = 0
 
-    counts = {l: len(training_data.get(l, [])) for l in LETTERS}
+    counts = {l: letter_counters.get(l, 0) for l in LETTERS}
     return jsonify({
         'ok': True,
         'csv_rows': total_rows,
@@ -532,7 +515,7 @@ def on_capture_landmark(data):
 
 
 def get_train_info():
-    counts = {l: len(training_data.get(l, [])) for l in LETTERS}
+    counts = {l: letter_counters.get(l, 0) for l in LETTERS}
     filtered = {u: n for u, n in contributor_stats.items()
                 if u not in ('Unknown', 'Anonymous') and n > 0}
     return {
