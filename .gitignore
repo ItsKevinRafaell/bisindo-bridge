@@ -1,47 +1,42 @@
+# Dataset (too large)
+dataset/*.csv
+dataset/landmarks/
+dataset/collectedimages/
+
+# Models (generated)
+models/ml/*.pkl
+models/ml/*.json
+models/dl/*.h5
+models/dl/*.json
+models/comparison_report.md
+
+# Python
 __pycache__/
 *.pyc
 *.pyo
-*.pkl
-*.keras
-*.h5
-*.csv
-dataset/custom/
-dataset/kaggle/
-dataset/train/
-dataset/test/
-dataset/collectedimages/
-dataset/assets/
-dataset/landmarks/
-models/*.pkl
-models/*.keras
-models/*.json
-!models/landmark_classifier_metadata.json
-!models/report.md
-web/models/*.json
-web/models/*.bin
-web/models/*.h5
-*.log
-*.png
-*.jpg
-.env
-venv/
-.venv/
-node_modules/
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
 .DS_Store
-*.mp3
-*.wav
-training_log_*.txt
-training_results.json
-backup-v1-image-based/dataset
-VPS_CREDENTIALS.md
-*.key
-*.pem
-.credentials*
-dataset/backups/
-dataset/counters.json
-dataset/.~lock.*
-.push_state.json
-.tunnel-url
-.server.pid
-meeting-server.log
-meeting-tunnel.log
+Thumbs.db
+
+# Logs
+*.log
+cron.log
+
+# Vercel
+.vercel/
+
+# Temp
+*.tmp
+*.bak

@@ -1,103 +1,65 @@
-# BISINDO Two-Way Communication Bridge
+# BISINDO Bridge - Claude Code Instructions
 
-## 🎯 Project Overview
+## Project Overview
 
-Aplikasi penerjemah BISINDO (Bahasa Isyarat Indonesia) **dua arah** menggunakan pendekatan **Landmark-Based Gesture Recognition**.
+Two-way BISINDO (Bahasa Isyarat Indonesia) translator using landmark-based gesture recognition.
+Comparison study: ML (Random Forest, SVM) vs DL (MLP, CNN).
 
-### Strategy Comparison
-
-| Approach | Data Needed | Training Time | Accuracy | Speed |
-|----------|-------------|---------------|----------|-------|
-| **Image-Based** (backup) | 500+ images | ~30 min (GPU) | 91.35% | ~100ms |
-| **Landmark-Based** (current) | 50-100 per letter | ~2 min (CPU) | TBD | ~5ms |
-
----
-
-## 🏗️ New Architecture (Landmark-Based)
+## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    LANDMARK-BASED PIPELINE                    │
-│                                                             │
-│  Gambar → MediaPipe Hands → 21 Landmarks → Features → Model │
-│              ↓                                               │
-│         [(x,y,z) × 21 = 63 values]                         │
-│              ↓                                               │
-│         Normalized & Scaled                                 │
-│              ↓                                               │
-│         Random Forest / Neural Network                       │
-│              ↓                                               │
-│         Prediksi Letter (A-Z)                               │
-└─────────────────────────────────────────────────────────────┘
+bisindo-bridge/
+├── train/              # Training scripts (per team)
+│   ├── train_ml.py     # ML Team: Random Forest, SVM
+│   └── train_dl.py     # DL Team: MLP, CNN
+├── eval/               # Evaluation
+│   └── compare.py      # ML vs DL comparison
+├── models/             # Model outputs (gitignored)
+│   ├── ml/             # ML team: rf_model.pkl, svm_model.pkl
+│   └── dl/             # DL team: mlp_model.h5, cnn_model.h5
+├── meeting/            # Flask-SocketIO meeting server
+├── web/                # Static frontend (Vercel-deployable)
+├── dataset/            # Data (gitignored)
+│   └── landmarks_captured_v2.csv  # 108k rows, 63 features
+└── docs/               # Documentation
+    ├── TEAM_GUIDE.md
+    └── PROPOSAL_OUTLINE.md
 ```
 
-### Why Landmark-Based?
+## Team Assignment
 
-1. **Invariant** terhadap lighting, background, hand size
-2. **Compact features** - hanya 63 nilai per sample
-3. **Fast training** - bisa di CPU dalam hitungan menit
-4. **Interpretable** - bisa visualize pola tangan
+| Team | Role | Training Command |
+|------|------|------------------|
+| ML (2) | Random Forest, SVM | `python train/train_ml.py --model both` |
+| DL (2) | MLP, CNN | `python train/train_dl.py --model both --epochs 50` |
+| Proposal (1) | Documentation | Use docs/PROPOSAL_OUTLINE.md |
 
----
+## Data Schema
 
-## 📁 Project Structure
+CSV: `landmarks_captured_v2.csv`
+- Columns: letter, image_path, split, num_hands, contributor, lm0_x..lm20_z
+- 63 features (21 landmarks x 3 coordinates)
+- ~108,000 samples, 26 letters (A-Z)
 
+## Key Commands
+
+```bash
+# ML Team
+python train/train_ml.py --model rf        # RF only
+python train/train_ml.py --model svm       # SVM only
+python train/train_ml.py --model both      # Both
+
+# DL Team
+pip install tensorflow tensorflowjs        # First time
+python train/train_dl.py --model mlp       # MLP only
+python train/train_dl.py --model cnn       # CNN only
+python train/train_dl.py --model both      # Both
+
+# Evaluation
+python eval/compare.py                     # Generate comparison report
 ```
-/home/kevin/bisindo-bridge/
-├── backup-v1-image-based/     # Previous strategy (for report)
-├── dataset/                   # BISINDO dataset
-│   ├── train/
-│   ├── test/
-│   └── landmarks/              # Extracted landmarks (to be generated)
-├── models/                    # Trained models
-├── src/
-│   ├── landmark_extractor.py  # MediaPipe → 63 features
-│   ├── landmark_trainer.py    # Training script
-│   ├── landmark_classifier.py  # Inference model
-│   ├── gesture_detector.py    # Real-time detection
-│   └── tts_engine.py          # Text-to-Speech
-├── app.py                    # Main Streamlit app
-├── requirements.txt
-└── CLAUDE.md
-```
 
----
-
-## 🔧 Implementation Plan
-
-### Phase 1: Landmark Extraction
-- [ ] Extract 63 features (21 landmarks × 3 coords) dari dataset
-- [ ] Build landmark dataset CSV
-- [ ] Validate extraction quality
-
-### Phase 2: Training
-- [ ] Train classifier (Random Forest / Simple NN)
-- [ ] Compare accuracy vs image-based
-- [ ] Optimize hyperparameters
-
-### Phase 3: Real-time Detection
-- [ ] Integrate dengan app.py
-- [ ] Add letter buffering
-- [ ] Performance testing
-
-### Phase 4: Data Collection
-- [ ] Auto-capture dengan landmarks
-- [ ] Incremental learning
-
----
-
-## 📊 Expected Results
-
-- **Training time**: ~2-5 min (vs 30 min)
-- **Accuracy**: Target > 85%
-- **Inference speed**: < 10ms (vs ~100ms)
-- **Dataset size needed**: 50-100 per letter (vs 500+)
-
----
-
-## ✅ Meeting Server - LIVE
-
-**Flask-SocketIO Video Meeting dengan BISINDO Recognition**
+## Meeting Server
 
 ```bash
 cd meeting
@@ -106,12 +68,16 @@ python app.py
 
 Akses: `http://localhost:5000` atau via Cloudflare tunnel
 
-**Features:**
-- Video relay via server (server-side processing)
-- BISINDO landmark extraction + prediction
-- Real-time letter detection (A-Z)
-- TTS pronunciation via gTTS
-- Multiple users in room
+## Branch Strategy
 
-**Last Updated**: 2026-06-18
-**Status**: Phase 1 - Meeting MVP Working ✅
+```
+main (production)
+├── ml/rf-dev, ml/svm-dev   # ML team
+├── dl/mlp-dev, dl/cnn-dev  # DL team
+└── docs/proposal           # Proposal
+```
+
+See `docs/BRANCH_STRATEGY.md` for workflow details.
+
+## Last Updated
+2026-06-28
