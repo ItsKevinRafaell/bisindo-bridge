@@ -5,10 +5,32 @@ Two-way Bahasa Isyarat Indonesia (BISINDO) translator using landmark-based gestu
 ## Project Overview
 
 BISINDO Bridge membandingkan dua pendekatan machine learning untuk pengenalan gestur BISINDO:
-- **ML Team**: Random Forest, SVM (traditional ML)
-- **DL Team**: MLP, CNN (deep learning)
+- **ML Team**: Traditional ML methods
+- **DL Team**: Deep learning methods
 
-Dataset: ~108,000 samples, 26 huruf (A-Z)
+Dataset: ~138,000 samples, 26 huruf (A-Z)
+
+## Project Structure
+
+```
+bisindo-bridge/
+├── train/               # Training scripts
+│   ├── train_ml.py     # ML Team
+│   └── train_dl.py     # DL Team
+├── eval/                # Evaluation scripts
+│   └── compare.py       # Model comparison
+├── models/              # Trained models (gitignored)
+│   ├── ml/              # ML team outputs
+│   └── dl/              # DL team outputs
+├── meeting/             # Meeting app server
+├── web/                 # Frontend
+├── docs/                # Documentation
+│   ├── TEAM_GUIDE.md
+│   ├── PROPOSAL_OUTLINE.md
+│   └── BRANCH_STRATEGY.md
+└── dataset/             # Dataset (gitignored)
+    └── landmarks_captured_v2.csv
+```
 
 ## Quick Start
 
@@ -19,55 +41,31 @@ cd bisindo-bridge
 pip install -r requirements.txt
 ```
 
-### 2. Data
-Data sudah tersedia di `dataset/landmarks_captured_v2.csv` (108k rows).
-
-### 3. Training
+### 2. Training
 
 **ML Team:**
 ```bash
-python train/train_ml.py --model both
+python train/train_ml.py --model rf  # atau model lain
 ```
 
 **DL Team:**
 ```bash
 pip install tensorflow tensorflowjs
-python train/train_dl.py --model both --epochs 50
+python train/train_dl.py --model mlp  # atau arsitektur lain
 ```
 
-### 4. Evaluation
+### 3. Evaluation
 ```bash
 python eval/compare.py
-```
-
-Output: `models/comparison_report.md`
-
-## Project Structure
-
-```
-bisindo-bridge/
-├── train/               # Training scripts
-│   ├── train_ml.py     # ML Team: RF, SVM
-│   └── train_dl.py     # DL Team: MLP, CNN
-├── eval/                # Evaluation scripts
-│   └── compare.py       # ML vs DL comparison
-├── models/              # Trained models (gitignored)
-│   ├── ml/              # ML team outputs
-│   └── dl/              # DL team outputs
-├── meeting/             # Meeting app server
-├── web/                 # Frontend (test, capture)
-├── docs/                # Documentation
-└── dataset/             # Dataset (gitignored)
-    └── landmarks_captured_v2.csv
 ```
 
 ## Team Assignment
 
 | Team | Role | Files |
 |------|------|-------|
-| **ML Team** | Random Forest, SVM | train/train_ml.py, models/ml/ |
-| **DL Team** | MLP, CNN | train/train_dl.py, models/dl/ |
-| **Proposal** | Documentation | docs/PROPOSAL_OUTLINE.md |
+| **ML Team (2)** | Traditional ML | train/train_ml.py, models/ml/ |
+| **DL Team (2)** | Deep Learning | train/train_dl.py, models/dl/ |
+| **Proposal (1)** | Documentation | docs/PROPOSAL_OUTLINE.md |
 
 ## Requirements
 
@@ -77,12 +75,6 @@ bisindo-bridge/
 - tensorflow (DL team only)
 - tensorflowjs (DL team only)
 
-## Timeline
+## Documentation
 
-| Week | Goal |
-|------|------|
-| 1-2 | Data collection (Sprint 1) |
-| 3-4 | Model training (Sprint 2) |
-| 5-6 | Evaluation & demo (Sprint 3) |
-| 7 | Final polish |
-| 10 | Deadline |
+Lihat `docs/TEAM_GUIDE.md` untuk panduan lengkap tim.
