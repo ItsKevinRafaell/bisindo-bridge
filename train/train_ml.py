@@ -44,9 +44,9 @@ def load_data(csv_path):
 def build_features(df):
     """Build feature matrix from landmarks (63 features per sample)."""
     cols = [f"lm{i}_{c}" for i in range(21) for c in ("x", "y", "z")]
-    X = df[cols].astype(np.float32).values
+    X = df[cols].values.astype(np.float32)
     X = np.nan_to_num(X, nan=0.0)
-    y = df["letter"].astype(str).values
+    y = np.array(df["letter"].astype(str))
     return X, y
 
 
