@@ -1,23 +1,20 @@
 #!/usr/bin/env python3
 """
-BISINDO Bridge - DL Team Training Script
+BISINDO Bridge - DL Team Training Script (PyTorch)
 Trains deep learning models (MLP, CNN) on landmark features.
 
 Team: DL (2 orang)
-Usage: python train/train_dl.py --model cnn --arch 1
+Usage: python train/train_dl.py --model cnn --arch 1 --epochs 50
 
 CNN Architectures:
   --arch 1: Baseline CNN (64->128->64)
   --arch 2: Deep CNN (128->256->128->64)
   --arch 3: Wide CNN (256->512->256)
-  --arch 4: CNN + LSTM hybrid
 
-Note: Requires tensorflow
-  pip install tensorflow tensorflowjs
+Requires: pip install torch
 """
 
 import os
-import sys
 import json
 import argparse
 import logging
@@ -28,8 +25,15 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.model_selection import train_test_split
 
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 log = logging.getLogger("dl_train")
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+log.info(f"Using device: {DEVICE}")
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE_DIR, "dataset")
@@ -48,73 +52,104 @@ def load_data(csv_path):
 def build_features(df):
     """Build feature matrix from landmarks (63 features per sample)."""
     cols = [f"lm{i}_{c}" for i in range(21) for c in ("x", "y", "z")]
-    X = df[cols].astype(np.float32).values
+    X = df[cols].values.astype(np.float32)
     X = np.nan_to_num(X, nan=0.0)
-    y = df["letter"].astype(str).values
+    y = np.array(df["letter"].astype(str))
     return X, y
 
 
-def build_mlp(num_classes, hidden_units=[256, 128, 64], dropout=[0.3, 0.2, 0.1]):
-    """Build MLP model with configurable architecture."""
-    from tensorflow import keras
-    layers = [keras.layers.Input(shape=(63,))]
-    for i, units in enumerate(hidden_units):
-        layers.append(keras.layers.Dense(units, activation="relu"))
-        if i < len(dropout):
-            layers.append(keras.layers.Dropout(dropout[i]))
-    layers.append(keras.layers.Dense(num_classes, activation="softmax"))
-    model = keras.Sequential(layers)
-    model.compile(optimizer="adam", loss="categorical_crossentropy", metrics=["accuracy"])
-    log.info(f"MLP architecture: {hidden_units}")
-    return model
+class MLP(nn.Module):
+    def __init__(self, input_dim=63, num_classes=26, hidden=[256, 128, 64]):
+        super().__init__()
+        layers = []
+        prev = input_dim
+        for h in hidden:
+            layers.extend([nn.Linear(prev, h), nn.ReLU(), nn.Dropout(0.3)])
+            prev = h
+        layers.append(nn.Linear(prev, num_classes))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.net(x)
 
 
-def build_cnn(num_classes, arch=1, kernel_size=3):
-    """Build CNN model with different architectures."""
-    from tensorflow import keras
+class CNN1D(nn.Module):
+    def __init__(self, input_dim=63, num_classes=26, arch=1, kernel_size=3):
+        super().__init__()
 
-    configs = {
-        1: ([64, 128, 64], "Baseline CNN"),
-        2: ([128, 256, 128, 64], "Deep CNN"),
-        3: ([256, 512, 256], "Wide CNN"),
-    }
+        configs = {
+            1: [64, 128, 64],
+            2: [128, 256, 128, 64],
+            3: [256, 512, 256],
+        }
+        filters = configs.get(arch, [64, 128, 64])
 
-    filters, name = configs.get(arch, ([64, 128, 64], "CNN"))
+        layers = [nn.Conv1d(1, filters[0], kernel_size, padding=kernel_size//2)]
+        for i in range(len(filters) - 1):
+            layers.append(nn.ReLU())
+            layers.append(nn.MaxPool1d(2))
+            layers.append(nn.Conv1d(filters[i], filters[i+1], kernel_size, padding=kernel_size//2))
 
-    log.info(f"CNN architecture {arch} ({name}): filters={filters}, kernel={kernel_size}")
+        self.conv = nn.Sequential(*layers)
+        self.fc = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(filters[-1] * (input_dim // (2**len(filters))), 128),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(128, num_classes)
+        )
 
-    layers = [keras.layers.Input(shape=(63, 1))]
-
-    for f in filters:
-        layers.append(keras.layers.Conv1D(f, kernel_size=kernel_size, activation="relu", padding="same"))
-        layers.append(keras.layers.MaxPooling1D(pool_size=2))
-
-    layers.append(keras.layers.Flatten())
-    layers.append(keras.layers.Dense(128, activation="relu"))
-    layers.append(keras.layers.Dropout(0.3))
-    layers.append(keras.layers.Dense(num_classes, activation="softmax"))
-
-    model = keras.Sequential(layers, name=f"cnn_arch{arch}")
-    model.compile(optimizer="adam", loss="categorical_crossentropy", metrics=["accuracy"])
-    return model
+    def forward(self, x):
+        x = self.conv(x)
+        return self.fc(x)
 
 
-def train_model(model, X_train, y_train, X_test, y_test, epochs=50, batch_size=256):
-    """Train model and return accuracy."""
-    from tensorflow import keras
-    log.info(f"Training {model.name}... epochs={epochs}, batch_size={batch_size}")
+def train_model(model, train_loader, val_loader, epochs=50):
+    """Train PyTorch model."""
+    log.info(f"Training {model.__class__.__name__}... epochs={epochs}")
     start = datetime.now()
 
-    history = model.fit(
-        X_train, y_train,
-        validation_data=(X_test, y_test),
-        epochs=epochs,
-        batch_size=batch_size,
-        verbose=2
-    )
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+
+    for epoch in range(epochs):
+        model.train()
+        total_loss = 0
+        for X_batch, y_batch in train_loader:
+            X_batch, y_batch = X_batch.to(DEVICE), y_batch.to(DEVICE)
+            optimizer.zero_grad()
+            outputs = model(X_batch)
+            loss = criterion(outputs, y_batch)
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+
+        if (epoch + 1) % 10 == 0:
+            model.eval()
+            correct, total = 0, 0
+            with torch.no_grad():
+                for X_batch, y_batch in val_loader:
+                    X_batch, y_batch = X_batch.to(DEVICE), y_batch.to(DEVICE)
+                    outputs = model(X_batch)
+                    _, predicted = torch.max(outputs, 1)
+                    total += y_batch.size(0)
+                    correct += (predicted == y_batch).sum().item()
+            acc = correct / total
+            log.info(f"  Epoch {epoch+1}/{epochs} - loss={total_loss/len(train_loader):.4f} - val_acc={acc:.4f}")
 
     elapsed = (datetime.now() - start).total_seconds()
-    _, acc = model.evaluate(X_test, y_test, verbose=0)
+
+    # Final evaluation
+    model.eval()
+    correct, total = 0, 0
+    with torch.no_grad():
+        for X_batch, y_batch in val_loader:
+            X_batch, y_batch = X_batch.to(DEVICE), y_batch.to(DEVICE)
+            outputs = model(X_batch)
+            _, predicted = torch.max(outputs, 1)
+            total += y_batch.size(0)
+            correct += (predicted == y_batch).sum().item()
+    acc = correct / total
 
     log.info(f"Training done in {elapsed:.1f}s, accuracy={acc:.4f}")
     return float(acc), elapsed
@@ -124,9 +159,9 @@ def save_model(model, scaler, label_encoder, acc, elapsed, model_name, arch=None
     """Save model and artifacts."""
     os.makedirs(MODEL_DIR, exist_ok=True)
 
-    # Keras model
-    model_path = os.path.join(MODEL_DIR, f"{model_name}_model.h5")
-    model.save(model_path)
+    # PyTorch model
+    model_path = os.path.join(MODEL_DIR, f"{model_name}_model.pt")
+    torch.save(model.state_dict(), model_path)
 
     # Scaler JSON
     scaler_path = os.path.join(MODEL_DIR, f"{model_name}_scaler.json")
@@ -147,6 +182,7 @@ def save_model(model, scaler, label_encoder, acc, elapsed, model_name, arch=None
         "accuracy": float(acc),
         "training_time_seconds": float(elapsed),
         "trained_at": datetime.now().isoformat(),
+        "framework": "pytorch",
     }
     if arch:
         metrics["architecture"] = arch
@@ -159,7 +195,7 @@ def save_model(model, scaler, label_encoder, acc, elapsed, model_name, arch=None
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train DL models")
+    parser = argparse.ArgumentParser(description="Train DL models (PyTorch)")
     parser.add_argument("--model", choices=["mlp", "cnn"], default="cnn",
                         help="Model type (default: cnn)")
     parser.add_argument("--arch", type=int, default=1, choices=[1, 2, 3],
@@ -188,34 +224,43 @@ def main():
 
     # Encode labels
     label_encoder = LabelEncoder()
-    y_train_enc = label_encoder.fit_transform(y_train)
-    y_test_enc = label_encoder.transform(y_test)
+    y_train_enc = label_encoder.fit_transform(y_train).astype(np.int64)
+    y_test_enc = label_encoder.transform(y_test).astype(np.int64)
     num_classes = len(label_encoder.classes_)
 
-    # One-hot encode
-    from tensorflow import keras
-    y_train_oh = keras.utils.to_categorical(y_train_enc, num_classes=num_classes)
-    y_test_oh = keras.utils.to_categorical(y_test_enc, num_classes=num_classes)
+    # Create dataloaders
+    if args.model == "mlp":
+        X_train_t = torch.FloatTensor(X_train_s)
+        X_test_t = torch.FloatTensor(X_test_s)
+        model_name = "mlp"
+    else:  # cnn
+        X_train_t = torch.FloatTensor(X_train_s.reshape(-1, 1, 63))
+        X_test_t = torch.FloatTensor(X_test_s.reshape(-1, 1, 63))
+        model_name = f"cnn_arch{args.arch}_k{args.kernel}"
+
+    y_train_t = torch.LongTensor(y_train_enc)
+    y_test_t = torch.LongTensor(y_test_enc)
+
+    train_dataset = TensorDataset(X_train_t, y_train_t)
+    val_dataset = TensorDataset(X_test_t, y_test_t)
+
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size)
+
+    # Build model
+    if args.model == "mlp":
+        model = MLP(input_dim=63, num_classes=num_classes).to(DEVICE)
+    else:
+        model = CNN1D(input_dim=63, num_classes=num_classes, arch=args.arch, kernel_size=args.kernel).to(DEVICE)
+
+    log.info(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     # Train
-    if args.model == "mlp":
-        model_name = "mlp"
-        model = build_mlp(num_classes)
-        acc, elapsed = train_model(model, X_train_s, y_train_oh, X_test_s, y_test_oh,
-                                   args.epochs, args.batch_size)
-        save_model(model, scaler, label_encoder, acc, elapsed, model_name)
+    acc, elapsed = train_model(model, train_loader, val_loader, args.epochs)
 
-    elif args.model == "cnn":
-        # Reshape for CNN: (samples, features, channels)
-        X_train_cnn = X_train_s.reshape(-1, 63, 1)
-        X_test_cnn = X_test_s.reshape(-1, 63, 1)
-
-        model_name = f"cnn_arch{args.arch}_k{args.kernel}"
-        model = build_cnn(num_classes, arch=args.arch, kernel_size=args.kernel)
-        acc, elapsed = train_model(model, X_train_cnn, y_train_oh, X_test_cnn, y_test_oh,
-                                   args.epochs, args.batch_size)
-        save_model(model, scaler, label_encoder, acc, elapsed, model_name,
-                   arch=f"filters_{args.arch}_kernel_{args.kernel}")
+    # Save
+    arch_str = f"arch{args.arch}_kernel{args.kernel}" if args.model == "cnn" else "mlp"
+    save_model(model, scaler, label_encoder, acc, elapsed, model_name, arch=arch_str)
 
     log.info(f"Training complete! Accuracy: {acc:.4f}")
 

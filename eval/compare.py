@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 BISINDO Bridge - Model Comparison Script
-Compares ML (RF, SVM) vs DL (MLP, CNN) performance.
+Compares ML vs DL model performance.
 
 Usage: python eval/compare.py
 
@@ -10,15 +10,16 @@ Output: models/comparison_report.md
 
 import os
 import json
-import pickle
 import logging
 from datetime import datetime
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.metrics import accuracy_score, classification_report
+
+import torch
+import torch.nn as nn
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 log = logging.getLogger("compare")
@@ -29,190 +30,170 @@ MODEL_DIR = os.path.join(BASE_DIR, "models")
 CSV_PATH = os.path.join(DATA_DIR, "landmarks_captured_v2.csv")
 
 
+class MLP(nn.Module):
+    def __init__(self, input_dim=63, num_classes=26, hidden=[256, 128, 64]):
+        super().__init__()
+        layers = []
+        prev = input_dim
+        for h in hidden:
+            layers.extend([nn.Linear(prev, h), nn.ReLU(), nn.Dropout(0.3)])
+            prev = h
+        layers.append(nn.Linear(prev, num_classes))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class CNN1D(nn.Module):
+    def __init__(self, input_dim=63, num_classes=26, arch=1, kernel_size=3):
+        super().__init__()
+        configs = {1: [64, 128, 64], 2: [128, 256, 128, 64], 3: [256, 512, 256]}
+        filters = configs.get(arch, [64, 128, 64])
+        layers = [nn.Conv1d(1, filters[0], kernel_size, padding=kernel_size//2)]
+        for i in range(len(filters) - 1):
+            layers.extend([nn.ReLU(), nn.MaxPool1d(2), nn.Conv1d(filters[i], filters[i+1], kernel_size, padding=kernel_size//2)])
+        self.conv = nn.Sequential(*layers)
+        self.fc = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(filters[-1] * (input_dim // (2**len(filters))), 128),
+            nn.ReLU(), nn.Dropout(0.3),
+            nn.Linear(128, num_classes)
+        )
+
+    def forward(self, x):
+        return self.fc(self.conv(x))
+
+
 def load_data():
-    """Load landmark data."""
     df = pd.read_csv(CSV_PATH, low_memory=False)
     cols = [f"lm{i}_{c}" for i in range(21) for c in ("x", "y", "z")]
-    X = df[cols].astype(np.float32).values
+    X = df[cols].values.astype(np.float32)
     X = np.nan_to_num(X, nan=0.0)
-    y = df["letter"].astype(str).values
+    y = np.array(df["letter"].astype(str))
     return X, y
 
 
 def load_sklearn_model(name):
-    """Load sklearn model and artifacts."""
+    """Load sklearn model."""
+    import pickle
     model_path = os.path.join(MODEL_DIR, "ml", f"{name}_model.pkl")
     scaler_path = os.path.join(MODEL_DIR, "ml", f"{name}_scaler.pkl")
     labels_path = os.path.join(MODEL_DIR, "ml", f"{name}_labels.pkl")
-
-    if not os.path.exists(model_path):
-        return None, None, None
-
+    if not all(os.path.exists(p) for p in [model_path, scaler_path, labels_path]):
+        return None
     with open(model_path, "rb") as f:
         model = pickle.load(f)
     with open(scaler_path, "rb") as f:
         scaler = pickle.load(f)
     with open(labels_path, "rb") as f:
         labels_data = pickle.load(f)
-        labels = labels_data.get("classes", labels_data)
+        labels = labels_data.get("classes", labels_data) if isinstance(labels_data, dict) else labels_data
+    return model, scaler, list(labels)
 
-    return model, scaler, labels
 
-
-def load_keras_model(name):
-    """Load Keras model and artifacts."""
-    from tensorflow import keras
-
-    model_path = os.path.join(MODEL_DIR, "dl", f"{name}_model.h5")
+def load_pytorch_model(name):
+    """Load PyTorch model."""
+    model_path = os.path.join(MODEL_DIR, "dl", f"{name}_model.pt")
     scaler_path = os.path.join(MODEL_DIR, "dl", f"{name}_scaler.json")
     labels_path = os.path.join(MODEL_DIR, "dl", f"{name}_labels.json")
-
-    if not os.path.exists(model_path):
-        return None, None, None
-
-    model = keras.models.load_model(model_path)
+    if not all(os.path.exists(p) for p in [model_path, scaler_path, labels_path]):
+        return None
     with open(scaler_path, "r") as f:
         scaler_data = json.load(f)
     with open(labels_path, "r") as f:
         labels = json.load(f)
-
-    return model, scaler_data, labels
+    return model_path, scaler_data, labels
 
 
 def predict_sklearn(model, scaler, X):
-    """Predict with sklearn model."""
     X_s = scaler.transform(X)
     return model.predict(X_s)
 
 
-def predict_keras(model, scaler_data, X):
-    """Predict with Keras model."""
+def predict_pytorch(model_path, scaler_data, X, is_cnn=False):
+    """Predict with PyTorch model."""
+    if is_cnn:
+        X = X.reshape(-1, 1, 63)
     mean = np.array(scaler_data["mean"])
     scale = np.array(scaler_data["scale"])
-    X_s = (X - mean) / scale
-    pred = model.predict(X_s, verbose=0)
-    pred_idx = np.argmax(pred, axis=1)
-    return np.array(labels)[pred_idx]
+    X_s = ((X - mean) / scale).astype(np.float32)
+    X_t = torch.FloatTensor(X_s)
+    model = MLP() if "mlp" in model_path else CNN1D()
+    model.load_state_dict(torch.load(model_path, weights_only=True))
+    model.eval()
+    with torch.no_grad():
+        outputs = model(X_t)
+        _, predicted = torch.max(outputs, 1)
+    return predicted.numpy()
 
 
-def evaluate_model(name, model, X_test, y_test, labels):
-    """Evaluate a single model."""
-    if model is None:
-        return None
+def evaluate_models(X_test, y_test):
+    results = []
 
-    y_pred = model.predict(X_test)
-    acc = accuracy_score(y_test, y_pred)
+    # Sklearn models
+    for name in ["rf", "svm"]:
+        log.info(f"Loading {name}...")
+        data = load_sklearn_model(name)
+        if data:
+            model, scaler, labels = data
+            y_pred = predict_sklearn(model, scaler, X_test)
+            acc = accuracy_score(y_test, y_pred)
+            results.append({"name": name.upper(), "accuracy": acc})
+            log.info(f"{name.upper()} accuracy: {acc:.4f}")
 
-    report = classification_report(y_test, y_pred, labels=labels, output_dict=True, zero_division=0)
+    # PyTorch models
+    for name in os.listdir(os.path.join(MODEL_DIR, "dl")):
+        if name.endswith("_model.pt"):
+            model_name = name.replace("_model.pt", "")
+            is_cnn = "cnn" in model_name
+            log.info(f"Loading {model_name}...")
+            data = load_pytorch_model(model_name)
+            if data:
+                model_path, scaler_data, labels = data
+                y_pred = predict_pytorch(model_path, scaler_data, X_test, is_cnn)
+                y_pred_labels = np.array(labels)[y_pred]
+                acc = accuracy_score(y_test, y_pred_labels)
+                results.append({"name": model_name.upper(), "accuracy": acc})
+                log.info(f"{model_name.upper()} accuracy: {acc:.4f}")
 
-    return {
-        "name": name,
-        "accuracy": float(acc),
-        "weighted_f1": float(report.get("weighted avg", {}).get("f1-score", 0)),
-        "per_letter": {l: report[l] for l in labels if l in report}
-    }
+    return results
 
 
 def generate_report(results):
-    """Generate markdown comparison report."""
     lines = [
         "# BISINDO Model Comparison Report",
         f"_Generated: {datetime.now().isoformat()}_",
         "",
         "## Summary",
         "",
-        "| Model | Accuracy | Weighted F1 |",
-        "|-------|----------|-------------|",
+        "| Model | Accuracy |",
+        "|-------|----------|",
     ]
-
     for r in results:
-        if r:
-            lines.append(f"| {r['name']} | {r['accuracy']:.4f} | {r['weighted_f1']:.4f} |")
+        lines.append(f"| {r['name']} | {r['accuracy']:.4f} |")
 
-    # Winner
-    valid_results = [r for r in results if r]
-    if valid_results:
-        winner = max(valid_results, key=lambda x: x["accuracy"])
-        lines.extend([
-            "",
-            f"**Best Model: {winner['name']}** ({winner['accuracy']:.2%} accuracy)",
-            "",
-            "## Per-Letter Comparison",
-            "",
-        ])
+    valid = [r for r in results if r]
+    if valid:
+        winner = max(valid, key=lambda x: x["accuracy"])
+        lines.extend(["", f"**Best Model: {winner['name']}** ({winner['accuracy']:.2%} accuracy)"])
 
-        # Table header
-        letters = sorted(set().union(*[set(r["per_letter"].keys()) for r in valid_results]))
-        lines.append("| Letter | " + " | ".join(r["name"] for r in valid_results) + " |")
-        lines.append("|--------|" + "|".join(["---------" for _ in valid_results]) + "|")
-
-        for letter in letters:
-            row = [letter]
-            for r in valid_results:
-                if letter in r["per_letter"]:
-                    f1 = r["per_letter"][letter]["f1-score"]
-                    row.append(f"{f1:.3f}")
-                else:
-                    row.append("-")
-            lines.append("| " + " | ".join(row) + " |")
-
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 
 def main():
-    # Load data
     log.info("Loading data...")
     X, y = load_data()
-
-    # Split (same as training)
     _, X_test, _, y_test = train_test_split(X, y, test_size=0.15, random_state=42, stratify=y)
 
-    results = []
-
-    # Load sklearn models
-    for name in ["rf", "svm"]:
-        log.info(f"Loading {name}...")
-        model, scaler, labels = load_sklearn_model(name)
-        if model:
-            y_pred = predict_sklearn(model, scaler, X_test)
-            acc = accuracy_score(y_test, y_pred)
-            results.append({
-                "name": name.upper(),
-                "accuracy": float(acc),
-                "per_letter": {}
-            })
-            log.info(f"{name.upper()} accuracy: {acc:.4f}")
-
-    # Load Keras models
-    for name in ["mlp", "cnn"]:
-        log.info(f"Loading {name}...")
-        try:
-            model, scaler_data, labels = load_keras_model(name)
-            if model:
-                mean = np.array(scaler_data["mean"])
-                scale = np.array(scaler_data["scale"])
-                X_s = (X_test - mean) / scale
-                pred = model.predict(X_s, verbose=0)
-                pred_idx = np.argmax(pred, axis=1)
-                y_pred = np.array(labels)[pred_idx]
-                acc = accuracy_score(y_test, y_pred)
-                results.append({
-                    "name": name.upper(),
-                    "accuracy": float(acc),
-                    "per_letter": {}
-                })
-                log.info(f"{name.upper()} accuracy: {acc:.4f}")
-        except Exception as e:
-            log.warning(f"Failed to load {name}: {e}")
-
-    # Generate report
+    results = evaluate_models(X_test, y_test)
     report = generate_report(results)
+
     report_path = os.path.join(MODEL_DIR, "comparison_report.md")
     with open(report_path, "w") as f:
         f.write(report)
 
-    log.info(f"✅ Report saved to {report_path}")
+    log.info(f"Report saved to {report_path}")
     print(report)
 
 
