@@ -4,11 +4,15 @@ BISINDO Bridge - DL Team Training Script
 Trains deep learning models (MLP, CNN) on landmark features.
 
 Team: DL (2 orang)
-Usage: python train/train_dl.py [--model mlp|cnn] [--epochs 50]
+Usage: python train/train_dl.py --model cnn --arch 1
 
-Output: models/dl/*.h5, models/dl/metrics.json
+CNN Architectures:
+  --arch 1: Baseline CNN (64->128->64)
+  --arch 2: Deep CNN (128->256->128->64)
+  --arch 3: Wide CNN (256->512->256)
+  --arch 4: CNN + LSTM hybrid
 
-Note: Requires tensorflow and tensorflowjs
+Note: Requires tensorflow
   pip install tensorflow tensorflowjs
 """
 
@@ -50,46 +54,57 @@ def build_features(df):
     return X, y
 
 
-def build_mlp(num_classes, input_dim=63):
-    """Build MLP model for landmark classification."""
+def build_mlp(num_classes, hidden_units=[256, 128, 64], dropout=[0.3, 0.2, 0.1]):
+    """Build MLP model with configurable architecture."""
     from tensorflow import keras
-    model = keras.Sequential([
-        keras.layers.Input(shape=(input_dim,)),
-        keras.layers.Dense(256, activation="relu"),
-        keras.layers.Dropout(0.3),
-        keras.layers.Dense(128, activation="relu"),
-        keras.layers.Dropout(0.2),
-        keras.layers.Dense(64, activation="relu"),
-        keras.layers.Dense(num_classes, activation="softmax"),
-    ])
+    layers = [keras.layers.Input(shape=(63,))]
+    for i, units in enumerate(hidden_units):
+        layers.append(keras.layers.Dense(units, activation="relu"))
+        if i < len(dropout):
+            layers.append(keras.layers.Dropout(dropout[i]))
+    layers.append(keras.layers.Dense(num_classes, activation="softmax"))
+    model = keras.Sequential(layers)
     model.compile(optimizer="adam", loss="categorical_crossentropy", metrics=["accuracy"])
+    log.info(f"MLP architecture: {hidden_units}")
     return model
 
 
-def build_cnn(num_classes, input_dim=63):
-    """Build 1D CNN model for landmark classification."""
+def build_cnn(num_classes, arch=1, kernel_size=3):
+    """Build CNN model with different architectures."""
     from tensorflow import keras
-    # Reshape for CNN: (samples, features, channels)
-    model = keras.Sequential([
-        keras.layers.Input(shape=(input_dim, 1)),
-        keras.layers.Conv1D(64, kernel_size=3, activation="relu"),
-        keras.layers.MaxPooling1D(pool_size=2),
-        keras.layers.Conv1D(128, kernel_size=3, activation="relu"),
-        keras.layers.MaxPooling1D(pool_size=2),
-        keras.layers.Conv1D(64, kernel_size=3, activation="relu"),
-        keras.layers.Flatten(),
-        keras.layers.Dense(128, activation="relu"),
-        keras.layers.Dropout(0.3),
-        keras.layers.Dense(num_classes, activation="softmax"),
-    ])
+
+    configs = {
+        1: ([64, 128, 64], "Baseline CNN"),
+        2: ([128, 256, 128, 64], "Deep CNN"),
+        3: ([256, 512, 256], "Wide CNN"),
+    }
+
+    filters, name = configs.get(arch, ([64, 128, 64], "CNN"))
+
+    log.info(f"CNN architecture {arch} ({name}): filters={filters}, kernel={kernel_size}")
+
+    layers = [keras.layers.Input(shape=(63, 1))]
+
+    for f in filters:
+        layers.append(keras.layers.Conv1D(f, kernel_size=kernel_size, activation="relu", padding="same"))
+        layers.append(keras.layers.MaxPooling1D(pool_size=2))
+
+    layers.append(keras.layers.Flatten())
+    layers.append(keras.layers.Dense(128, activation="relu"))
+    layers.append(keras.layers.Dropout(0.3))
+    layers.append(keras.layers.Dense(num_classes, activation="softmax"))
+
+    model = keras.Sequential(layers, name=f"cnn_arch{arch}")
     model.compile(optimizer="adam", loss="categorical_crossentropy", metrics=["accuracy"])
     return model
 
 
 def train_model(model, X_train, y_train, X_test, y_test, epochs=50, batch_size=256):
-    """Train model and evaluate."""
+    """Train model and return accuracy."""
     from tensorflow import keras
-    log.info(f"Training {model.name}...")
+    log.info(f"Training {model.name}... epochs={epochs}, batch_size={batch_size}")
+    start = datetime.now()
+
     history = model.fit(
         X_train, y_train,
         validation_data=(X_test, y_test),
@@ -97,11 +112,15 @@ def train_model(model, X_train, y_train, X_test, y_test, epochs=50, batch_size=2
         batch_size=batch_size,
         verbose=2
     )
+
+    elapsed = (datetime.now() - start).total_seconds()
     _, acc = model.evaluate(X_test, y_test, verbose=0)
-    return float(acc), history
+
+    log.info(f"Training done in {elapsed:.1f}s, accuracy={acc:.4f}")
+    return float(acc), elapsed
 
 
-def save_model(model, scaler, label_encoder, acc, model_name):
+def save_model(model, scaler, label_encoder, acc, elapsed, model_name, arch=None):
     """Save model and artifacts."""
     os.makedirs(MODEL_DIR, exist_ok=True)
 
@@ -123,34 +142,34 @@ def save_model(model, scaler, label_encoder, acc, model_name):
         json.dump(list(label_encoder.classes_), f)
 
     # Metrics
+    metrics = {
+        "model": model_name,
+        "accuracy": float(acc),
+        "training_time_seconds": float(elapsed),
+        "trained_at": datetime.now().isoformat(),
+    }
+    if arch:
+        metrics["architecture"] = arch
+
     metrics_path = os.path.join(MODEL_DIR, f"{model_name}_metrics.json")
     with open(metrics_path, "w") as f:
-        json.dump({
-            "model": model_name,
-            "accuracy": acc,
-            "trained_at": datetime.now().isoformat(),
-        }, f, indent=2)
+        json.dump(metrics, f, indent=2)
 
     log.info(f"Saved to {MODEL_DIR}/{model_name}_*")
 
 
-def export_tfjs(model_path, output_dir):
-    """Export Keras model to TensorFlow.js format."""
-    try:
-        import tensorflowjs as tfjs
-        os.makedirs(output_dir, exist_ok=True)
-        tfjs.converters.save_keras_model(model_path, output_dir)
-        log.info(f"TF.js model -> {output_dir}")
-    except ImportError:
-        log.warning("tensorflowjs not installed: pip install tensorflowjs")
-
-
 def main():
     parser = argparse.ArgumentParser(description="Train DL models")
-    parser.add_argument("--model", choices=["mlp", "cnn", "both"], default="both",
-                        help="Model to train (default: both)")
+    parser.add_argument("--model", choices=["mlp", "cnn"], default="cnn",
+                        help="Model type (default: cnn)")
+    parser.add_argument("--arch", type=int, default=1, choices=[1, 2, 3],
+                        help="CNN architecture (1=baseline, 2=deep, 3=wide)")
+    parser.add_argument("--kernel", type=int, default=3, choices=[3, 5, 7],
+                        help="CNN kernel size (default: 3)")
     parser.add_argument("--epochs", type=int, default=50,
                         help="Number of epochs (default: 50)")
+    parser.add_argument("--batch-size", type=int, default=256,
+                        help="Batch size (default: 256)")
     args = parser.parse_args()
 
     # Load data
@@ -179,19 +198,26 @@ def main():
     y_test_oh = keras.utils.to_categorical(y_test_enc, num_classes=num_classes)
 
     # Train
-    if args.model in ["mlp", "both"]:
-        mlp = build_mlp(num_classes)
-        mlp_acc, _ = train_model(mlp, X_train_s, y_train_oh, X_test_s, y_test_oh, args.epochs)
-        save_model(mlp, scaler, label_encoder, mlp_acc, "mlp")
-        log.info(f"MLP Accuracy: {mlp_acc:.4f}")
+    if args.model == "mlp":
+        model_name = "mlp"
+        model = build_mlp(num_classes)
+        acc, elapsed = train_model(model, X_train_s, y_train_oh, X_test_s, y_test_oh,
+                                   args.epochs, args.batch_size)
+        save_model(model, scaler, label_encoder, acc, elapsed, model_name)
 
-    if args.model in ["cnn", "both"]:
-        cnn = build_cnn(num_classes)
-        cnn_acc, _ = train_model(cnn, X_train_s, y_train_oh, X_test_s, y_test_oh, args.epochs)
-        save_model(cnn, scaler, label_encoder, cnn_acc, "cnn")
-        log.info(f"CNN Accuracy: {cnn_acc:.4f}")
+    elif args.model == "cnn":
+        # Reshape for CNN: (samples, features, channels)
+        X_train_cnn = X_train_s.reshape(-1, 63, 1)
+        X_test_cnn = X_test_s.reshape(-1, 63, 1)
 
-    log.info("Training complete!")
+        model_name = f"cnn_arch{args.arch}_k{args.kernel}"
+        model = build_cnn(num_classes, arch=args.arch, kernel_size=args.kernel)
+        acc, elapsed = train_model(model, X_train_cnn, y_train_oh, X_test_cnn, y_test_oh,
+                                   args.epochs, args.batch_size)
+        save_model(model, scaler, label_encoder, acc, elapsed, model_name,
+                   arch=f"filters_{args.arch}_kernel_{args.kernel}")
+
+    log.info(f"Training complete! Accuracy: {acc:.4f}")
 
 
 if __name__ == "__main__":
