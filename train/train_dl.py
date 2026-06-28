@@ -91,9 +91,11 @@ class CNN1D(nn.Module):
             layers.append(nn.Conv1d(filters[i], filters[i+1], kernel_size, padding=kernel_size//2))
 
         self.conv = nn.Sequential(*layers)
+        # Use AdaptiveAvgPool to handle variable output sizes
+        self.pool = nn.AdaptiveAvgPool1d(8)  # Fixed output length of 8
         self.fc = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(filters[-1] * (input_dim // (2**len(filters))), 128),
+            nn.Linear(filters[-1] * 8, 128),
             nn.ReLU(),
             nn.Dropout(0.3),
             nn.Linear(128, num_classes)
@@ -101,6 +103,7 @@ class CNN1D(nn.Module):
 
     def forward(self, x):
         x = self.conv(x)
+        x = self.pool(x)
         return self.fc(x)
 
 
