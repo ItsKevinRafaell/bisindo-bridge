@@ -9,6 +9,7 @@ class SentenceBuilder {
         this.stabilityThreshold = options.stabilityMs || 500;
         this.spaceNoHandMs = options.spaceNoHandMs || 2000;
         this.enterNoHandMs = options.enterNoHandMs || 4000;
+        this.gestureHoldMs = options.gestureHoldMs || 2000;
 
         // State
         this.currentLetter = null;
@@ -20,11 +21,18 @@ class SentenceBuilder {
         this.lastHandTime = Date.now();
         this.lastCommittedLetter = '';
 
+        // Gesture tracking
+        this.currentGesture = null;
+        this.gestureStartTime = 0;
+        this.gestureTriggered = false;
+
         // Callbacks
         this.onLetterCommit = options.onLetterCommit || (() => {});
         this.onWordComplete = options.onWordComplete || (() => {});
         this.onSentenceComplete = options.onSentenceComplete || (() => {});
         this.onGesture = options.onGesture || (() => {});
+        this.onBackspace = options.onBackspace || (() => {});
+        this.onDeleteWord = options.onDeleteWord || (() => {});
     }
 
     /**
@@ -44,21 +52,49 @@ class SentenceBuilder {
             } else if (noHandDuration >= this.spaceNoHandMs && this.currentWord) {
                 this.insertSpace();
             }
+            // Reset gesture tracking when no hand
+            this.currentGesture = null;
+            this.gestureTriggered = false;
             return;
         }
 
         this.lastHandTime = now;
 
-        // Gesture overrides
-        if (gestureState === 'fist') {
-            this.insertSpace();
-            this.onGesture('space');
+        // Track gesture hold time
+        if (gestureState === 'fist' || gestureState === 'palm') {
+            if (gestureState !== this.currentGesture) {
+                // New gesture started
+                this.currentGesture = gestureState;
+                this.gestureStartTime = now;
+                this.gestureTriggered = false;
+            } else {
+                // Same gesture continuing
+                const gestureDuration = now - this.gestureStartTime;
+
+                // Trigger action after hold time
+                if (gestureDuration >= this.gestureHoldMs && !this.gestureTriggered) {
+                    this.gestureTriggered = true;
+
+                    if (gestureState === 'fist') {
+                        // Fist hold = backspace (delete last letter)
+                        this.backspace();
+                        this.onGesture('backspace');
+                        this.onBackspace(this.currentWord);
+                    } else if (gestureState === 'palm') {
+                        // Palm hold = delete word
+                        this.deleteWord();
+                        this.onGesture('delete_word');
+                        this.onDeleteWord(this.currentWord);
+                    }
+                }
+            }
             return;
         }
-        if (gestureState === 'palm') {
-            this.completeSentence();
-            this.onGesture('enter');
-            return;
+
+        // Reset gesture tracking if not fist/palm
+        if (gestureState !== this.currentGesture) {
+            this.currentGesture = null;
+            this.gestureTriggered = false;
         }
 
         // Letter stability check
@@ -108,6 +144,28 @@ class SentenceBuilder {
         this.sentences.push(sentence);
         this.onSentenceComplete(sentence, this.sentences);
         this.words = [];
+    }
+
+    /** Backspace - delete the last letter from current word. */
+    backspace() {
+        if (this.currentWord.length > 0) {
+            this.currentWord = this.currentWord.slice(0, -1);
+            this.lastCommittedLetter = this.currentWord.length > 0
+                ? this.currentWord[this.currentWord.length - 1]
+                : '';
+            this.onBackspace(this.currentWord);
+        }
+    }
+
+    /** Delete the entire current word. */
+    deleteWord() {
+        if (this.currentWord.length > 0) {
+            const deletedWord = this.currentWord;
+            this.currentWord = '';
+            this.lastCommittedLetter = '';
+            this.currentLetter = null;
+            this.onDeleteWord(deletedWord);
+        }
     }
 
     // Manual triggers (for UI buttons)
