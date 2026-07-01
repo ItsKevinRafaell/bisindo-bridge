@@ -74,7 +74,7 @@ Saat kamu menunjukkan tangan ke webcam, MediaPipe melakukan:
 
 1. **Deteksi tangan** → temukan bounding box tangan di frame
 2. **Landmark estimation** → prediksi 21 titik pada setiap tangan
-3. **Output**: array of (x, y, z) untuk setiap landmark
+3. **Output**: array of (x, y, z) untuk setiap landmark (di projek ini tidak menggunakan z axis)
 
 ```python
 # Contoh output MediaPipe

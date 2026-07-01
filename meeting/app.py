@@ -466,6 +466,62 @@ def on_predict_landmarks(data):
         print(f"Predict error: {e}")
 
 
+# ---- SocketIO: sentence building ----
+@socketio.on('letter_committed')
+def on_letter_committed(data):
+    """Broadcast a committed letter to the room."""
+    room_id = data.get('room', 'default')
+    emit('letter_committed', {
+        'username': data.get('username', 'unknown'),
+        'letter': data.get('letter', ''),
+    }, room=room_id, include_self=False)
+
+
+@socketio.on('space_inserted')
+def on_space_inserted(data):
+    """Broadcast a space insertion to the room."""
+    room_id = data.get('room', 'default')
+    emit('space_inserted', {
+        'username': data.get('username', 'unknown'),
+    }, room=room_id, include_self=False)
+
+
+@socketio.on('sentence_completed')
+def on_sentence_completed(data):
+    """Broadcast a completed sentence to the room."""
+    room_id = data.get('room', 'default')
+    sentence = data.get('sentence', '')
+    if sentence:
+        emit('sentence_broadcast', {
+            'username': data.get('username', 'unknown'),
+            'sentence': sentence,
+            'timestamp': datetime.now().isoformat(),
+        }, room=room_id, include_self=False)
+
+
+@socketio.on('tts_request')
+def on_tts_request(data):
+    """Generate TTS audio and broadcast to room."""
+    room_id = data.get('room', 'default')
+    text = data.get('text', '')
+    if not text:
+        return
+    try:
+        from src.tts_engine import TTSEngine
+        tts = TTSEngine()
+        audio_data = tts.text_to_audio(text)
+        if audio_data:
+            import base64
+            audio_b64 = base64.b64encode(audio_data).decode('utf-8')
+            emit('tts_audio', {
+                'username': data.get('username', 'unknown'),
+                'text': text,
+                'audio': f'data:audio/mp3;base64,{audio_b64}',
+            }, room=room_id)
+    except Exception as e:
+        log.error(f"TTS error: {e}")
+
+
 # ---- SocketIO: training (legacy /train page) ----
 @socketio.on('train_join')
 def on_train_join(data=None):
@@ -543,7 +599,7 @@ def get_local_ip():
 
 if __name__ == '__main__':
     host = os.environ.get('BISINDO_HOST', '127.0.0.1')
-    port = int(os.environ.get('BISINDO_PORT', '5000'))
+    port = int(os.environ.get('BISINDO_PORT', '4500'))
 
     init_classifier()
     load_existing_training_data()

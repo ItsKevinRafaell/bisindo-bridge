@@ -1,6 +1,6 @@
 /**
  * Teman Meeting Kamu - Client
- * With client-side MediaPipe hand detection
+ * With client-side ONNX inference + Sentence Builder
  */
 
 const SERVER_URL = window.location.origin;
@@ -8,17 +8,35 @@ let socket = null;
 let localStream = null;
 let roomId = null;
 let username = null;
-let predictionBuffer = [];
 let videoShareInterval = null;
 let lastFrameTime = 0;
 
-// MediaPipe
-let handsDetector = null;
+// MediaPipe HandLandmarker (2 hands)
+let handLandmarker = null;
 let mpCanvas = null;
 let mpCtx = null;
 let detectionActive = false;
-let lastPredictionTime = 0;
-const PREDICTION_THROTTLE = 300; // ms between predictions
+let videoTs = 0;
+
+// ONNX Model
+let session = null;
+let scaler = null;
+let labels = null;
+let modelLoaded = false;
+
+// Sentence Builder
+let sentenceBuilder = null;
+let lastGestureState = null;
+let gestureStartTime = 0;
+const GESTURE_CONFIRM_MS = 800;
+
+const HAND_CONNECTIONS = [
+    [0,1],[1,2],[2,3],[3,4],
+    [0,5],[5,6],[6,7],[7,8],
+    [5,9],[9,10],[10,11],[11,12],
+    [9,13],[13,14],[14,15],[15,16],
+    [13,17],[17,18],[18,19],[19,20],[0,17]
+];
 
 document.addEventListener('DOMContentLoaded', async () => {
     const saved = localStorage.getItem('bisindo_username');
@@ -49,9 +67,16 @@ async function init() {
         removeVideoCard(data.username);
     });
 
-    socket.on('prediction', (data) => {
-        if (data.error) return;
-        handlePrediction(data);
+    socket.on('letter_committed', (data) => {
+        if (data.username !== username) handleRemoteLetter(data);
+    });
+
+    socket.on('space_inserted', (data) => {
+        if (data.username !== username) handleRemoteSpace(data);
+    });
+
+    socket.on('sentence_broadcast', (data) => {
+        if (data.username !== username) handleRemoteSentence(data);
     });
 
     socket.on('video_frame', (data) => {
@@ -61,10 +86,140 @@ async function init() {
     socket.on('chat_message', (data) => {
         addChatMessage(data.username, data.message);
     });
+
+    // Load TF.js model in background
+    loadModel();
 }
 
+// --- ONNX Model ---
+
+async function loadModel() {
+    const statusEl = document.getElementById('modelStatus');
+    if (statusEl) statusEl.textContent = 'Loading model...';
+
+    try {
+        session = await ort.InferenceSession.create('/static/models/model.onnx');
+        const [scalerRes, labelsRes] = await Promise.all([
+            fetch('/static/models/scaler.json').then(r => r.json()),
+            fetch('/static/models/labels.json').then(r => r.json()),
+        ]);
+        scaler = scalerRes;
+        labels = labelsRes;
+        modelLoaded = true;
+        console.log(`ONNX model loaded: ${scaler.mean.length} features, ${labels.length} classes`);
+        if (statusEl) statusEl.textContent = 'Model ready';
+    } catch (err) {
+        console.error('Model load failed:', err);
+        console.error('Error details:', JSON.stringify(err, null, 2));
+        if (statusEl) statusEl.textContent = 'Model failed: ' + (err.message || err);
+    }
+}
+
+// --- Feature extraction (84 features: xy only) ---
+
+function landmarksToFeatures(results) {
+    if (!results.landmarks || results.landmarks.length === 0) return null;
+    const hand1 = results.landmarks[0];
+    const hand1Flat = [];
+    hand1.forEach(p => hand1Flat.push(p.x, p.y));
+    while (hand1Flat.length < 42) hand1Flat.push(0);
+
+    let hand2Flat = new Array(42).fill(0);
+    if (results.landmarks.length > 1) {
+        const hand2 = results.landmarks[1];
+        hand2Flat = [];
+        hand2.forEach(p => hand2Flat.push(p.x, p.y));
+        while (hand2Flat.length < 42) hand2Flat.push(0);
+    }
+    return hand1Flat.concat(hand2Flat);
+}
+
+function normalizeFeaturesHandCentric(raw) {
+    function normalizeHand(arr) {
+        const wx = arr[0], wy = arr[1];
+        const centered = [];
+        for (let i = 0; i < arr.length; i += 2) {
+            centered.push(arr[i] - wx, arr[i+1] - wy);
+        }
+        let maxD = 0;
+        for (let i = 0; i < centered.length; i += 2) {
+            const d = Math.sqrt(centered[i]**2 + centered[i+1]**2);
+            if (d > maxD) maxD = d;
+        }
+        if (maxD > 0) for (let i = 0; i < centered.length; i++) centered[i] /= maxD;
+        return centered;
+    }
+    return normalizeHand(raw.slice(0, 42)).concat(normalizeHand(raw.slice(42, 84)));
+}
+
+function scaleFeatures(features) {
+    const out = new Array(features.length);
+    for (let i = 0; i < features.length; i++) {
+        out[i] = (features[i] - scaler.mean[i]) / scaler.scale[i];
+    }
+    return out;
+}
+
+async function predictModel(features) {
+    // CNN expects [1, 1, 84] = (batch, channels, features)
+    const inputTensor = new ort.Tensor('float32', Float32Array.from(features), [1, 1, features.length]);
+    const feeds = { input: inputTensor };
+    const results = await session.run(feeds);
+    const outputKey = Object.keys(results)[0];
+    const probs = results[outputKey].data;
+    return Array.from(probs);
+}
+
+// --- Gesture Detection ---
+
+function detectGesture(landmarks) {
+    if (!landmarks || landmarks.length < 21) return null;
+    const wrist = landmarks[0];
+    const fingertips = [4, 8, 12, 16, 20];
+
+    let maxDist = 0;
+    for (let i = 0; i < 21; i++) {
+        for (let j = i + 1; j < 21; j++) {
+            const dx = landmarks[i].x - landmarks[j].x;
+            const dy = landmarks[i].y - landmarks[j].y;
+            const dz = landmarks[i].z - landmarks[j].z;
+            const d = Math.sqrt(dx*dx + dy*dy + dz*dz);
+            if (d > maxDist) maxDist = d;
+        }
+    }
+    if (maxDist < 1e-6) return 'signing';
+
+    const tipDists = fingertips.map(i => {
+        const dx = landmarks[i].x - wrist.x;
+        const dy = landmarks[i].y - wrist.y;
+        const dz = landmarks[i].z - wrist.z;
+        return Math.sqrt(dx*dx + dy*dy + dz*dz) / maxDist;
+    });
+
+    const meanTipDist = tipDists.reduce((a, b) => a + b, 0) / tipDists.length;
+
+    if (meanTipDist < 0.3) return 'fist';
+
+    if (tipDists.every(d => d > 0.5)) {
+        const tipLandmarks = fingertips.map(i => landmarks[i]);
+        let spreadSum = 0, spreadCount = 0;
+        for (let i = 0; i < tipLandmarks.length; i++) {
+            for (let j = i + 1; j < tipLandmarks.length; j++) {
+                const dx = tipLandmarks[i].x - tipLandmarks[j].x;
+                const dy = tipLandmarks[i].y - tipLandmarks[j].y;
+                spreadSum += Math.sqrt(dx*dx + dy*dy);
+                spreadCount++;
+            }
+        }
+        if (spreadSum / spreadCount > 0.1) return 'palm';
+    }
+
+    return 'signing';
+}
+
+// --- MediaPipe HandLandmarker ---
+
 async function joinMeeting() {
-    // Validate name
     const nameInput = document.getElementById('username');
     username = nameInput.value.trim();
     if (!username) {
@@ -101,7 +256,8 @@ async function joinMeeting() {
                     socket.emit('join', { room: roomId, username });
                 });
             }
-            initMediaPipe();
+            initHandLandmarker();
+            initSentenceBuilder();
             startVideoSharing();
         };
     } catch (err) {
@@ -109,11 +265,11 @@ async function joinMeeting() {
     }
 }
 
-async function initMediaPipe() {
+async function initHandLandmarker() {
     const localVideo = document.getElementById('localVideo');
     const card = document.getElementById('localCard');
 
-    // Create overlay canvas for drawing landmarks
+    // Create overlay canvas
     mpCanvas = document.createElement('canvas');
     mpCanvas.id = 'mpCanvas';
     mpCanvas.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:2;';
@@ -128,109 +284,240 @@ async function initMediaPipe() {
     mpCtx = mpCanvas.getContext('2d');
 
     try {
-        // Load MediaPipe Hands from LOCAL files
-        await loadScript('/static/mediapipe/hands.js');
-        await loadScript('/static/mediapipe/drawing_utils.js');
+        const { HandLandmarker, FilesetResolver } = await import(
+            "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/vision_bundle.mjs"
+        );
 
-        handsDetector = new Hands({
-            locateFile: (file) => `/static/mediapipe/${file}`
+        const vision = await FilesetResolver.forVisionTasks(
+            'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm'
+        );
+        handLandmarker = await HandLandmarker.createFromOptions(vision, {
+            baseOptions: {
+                modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+                delegate: 'GPU'
+            },
+            runningMode: 'VIDEO',
+            numHands: 2
         });
-        handsDetector.setOptions({
-            maxNumHands: 1,
-            modelComplexity: 0,
-            minDetectionConfidence: 0.5,
-            minTrackingConfidence: 0.5,
-            useCpuInference: true
-        });
-        handsDetector.onResults(onHandResults);
 
         detectionActive = true;
         runDetection();
-        console.log('✅ MediaPipe Hands initialized');
+        console.log('✅ MediaPipe HandLandmarker initialized');
     } catch (err) {
-        console.error('MediaPipe init failed:', err);
+        console.error('HandLandmarker init failed:', err);
     }
 }
 
-function loadScript(src) {
-    return new Promise((resolve, reject) => {
-        if (document.querySelector(`script[src="${src}"]`)) {
-            resolve();
-            return;
-        }
-        const script = document.createElement('script');
-        script.src = src;
-        script.crossOrigin = 'anonymous';
-        script.onload = resolve;
-        script.onerror = reject;
-        document.head.appendChild(script);
-    });
-}
-
 function runDetection() {
-    if (!detectionActive) return;
+    if (!detectionActive || !handLandmarker) return;
 
     const localVideo = document.getElementById('localVideo');
     if (localVideo && localVideo.readyState >= 2) {
-        handsDetector.send({ image: localVideo }).catch(() => {});
+        videoTs += 33;
+        const results = handLandmarker.detectForVideo(localVideo, videoTs);
+        processResults(results);
     }
     requestAnimationFrame(runDetection);
 }
 
-const HAND_CONNECTIONS = [
-    [0,1],[1,2],[2,3],[3,4],       // thumb
-    [0,5],[5,6],[6,7],[7,8],       // index
-    [0,9],[9,10],[10,11],[11,12],  // middle
-    [0,13],[13,14],[14,15],[15,16],// ring
-    [0,17],[17,18],[18,19],[19,20],// pinky
-    [5,9],[9,13],[13,17]           // palm
-];
-
-function onHandResults(results) {
+function processResults(results) {
     if (!mpCtx) return;
-
     mpCtx.clearRect(0, 0, mpCanvas.width, mpCanvas.height);
 
-    if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-        const landmarks = results.multiHandLandmarks[0];
-        const w = mpCanvas.width;
-        const h = mpCanvas.height;
+    const handDetected = results.landmarks && results.landmarks.length > 0;
+    let gestureState = null;
+    let prediction = null;
 
-        // Draw connections
-        mpCtx.strokeStyle = '#00FF88';
-        mpCtx.lineWidth = 3;
-        HAND_CONNECTIONS.forEach(([s, e]) => {
-            const p1 = landmarks[s], p2 = landmarks[e];
-            if (p1 && p2) {
-                mpCtx.beginPath();
-                mpCtx.moveTo(p1.x * w, p1.y * h);
-                mpCtx.lineTo(p2.x * w, p2.y * h);
-                mpCtx.stroke();
-            }
-        });
+    if (handDetected) {
+        // Draw landmarks
+        results.landmarks.forEach((lms, handIdx) => drawHand(lms, handIdx));
 
-        // Draw points
-        mpCtx.fillStyle = '#FF4444';
-        landmarks.forEach(p => {
-            mpCtx.beginPath();
-            mpCtx.arc(p.x * w, p.y * h, 5, 0, Math.PI * 2);
-            mpCtx.fill();
-        });
-
-        // Send landmarks to server for prediction (throttled)
+        // Gesture detection with 800ms confirmation
+        const rawGesture = detectGesture(results.landmarks[0]);
         const now = Date.now();
-        if (now - lastPredictionTime > PREDICTION_THROTTLE) {
-            lastPredictionTime = now;
-            const flat = [];
-            landmarks.forEach(p => flat.push(p.x, p.y, p.z));
-            socket.emit('predict_landmarks', {
-                room: roomId,
-                username: username,
-                landmarks: flat
-            });
+        if (rawGesture !== lastGestureState) {
+            lastGestureState = rawGesture;
+            gestureStartTime = now;
+        }
+        if ((rawGesture === 'fist' || rawGesture === 'palm') &&
+            (now - gestureStartTime >= GESTURE_CONFIRM_MS)) {
+            gestureState = rawGesture;
+        } else {
+            gestureState = 'signing';
+        }
+
+        // CNN prediction (if model loaded)
+        if (modelLoaded) {
+            const rawFeats = landmarksToFeatures(results);
+            if (rawFeats) {
+                const normalized = normalizeFeaturesHandCentric(rawFeats);
+                const scaled = scaleFeatures(normalized);
+                predictModel(scaled).then(probs => {
+                    const indexed = probs.map((p, i) => ({ letter: labels[i], p }));
+                    indexed.sort((a, b) => b.p - a.p);
+                    const top = indexed[0];
+
+                    // Update overlay
+                    const overlay = document.getElementById('predictionOverlay');
+                    if (overlay) {
+                        overlay.textContent = top.p > 0.5 ? top.letter : '?';
+                        overlay.style.display = 'block';
+                    }
+
+                    if (top.p > 0.5) {
+                        prediction = { letter: top.letter, confidence: top.p };
+                    }
+
+                    // Feed to sentence builder
+                    if (sentenceBuilder) {
+                        sentenceBuilder.feed(prediction, handDetected, gestureState);
+                    }
+                });
+            }
+        }
+
+        // Show gesture indicator on canvas
+        if (gestureState === 'fist') {
+            mpCtx.fillStyle = 'rgba(239, 68, 68, 0.7)';
+            mpCtx.fillRect(mpCanvas.width - 120, mpCanvas.height - 40, 110, 30);
+            mpCtx.fillStyle = '#fff';
+            mpCtx.font = '16px Poppins';
+            mpCtx.fillText('✊ SPACE', mpCanvas.width - 110, mpCanvas.height - 18);
+        } else if (gestureState === 'palm') {
+            mpCtx.fillStyle = 'rgba(59, 130, 246, 0.7)';
+            mpCtx.fillRect(mpCanvas.width - 120, mpCanvas.height - 40, 110, 30);
+            mpCtx.fillStyle = '#fff';
+            mpCtx.font = '16px Poppins';
+            mpCtx.fillText('🖐 ENTER', mpCanvas.width - 110, mpCanvas.height - 18);
+        }
+    } else {
+        lastGestureState = null;
+        // Feed no-hand to sentence builder
+        if (sentenceBuilder) {
+            sentenceBuilder.feed(null, false, null);
         }
     }
 }
+
+function drawHand(landmarks, handIdx) {
+    const w = mpCanvas.width, h = mpCanvas.height;
+    const color = handIdx === 0 ? '#00FF88' : '#FFB800';
+    mpCtx.strokeStyle = color;
+    mpCtx.lineWidth = 3;
+    for (const [s, e] of HAND_CONNECTIONS) {
+        const p1 = landmarks[s], p2 = landmarks[e];
+        if (!p1 || !p2) continue;
+        mpCtx.beginPath();
+        mpCtx.moveTo(p1.x * w, p1.y * h);
+        mpCtx.lineTo(p2.x * w, p2.y * h);
+        mpCtx.stroke();
+    }
+    mpCtx.fillStyle = handIdx === 0 ? '#FF4444' : '#FF8800';
+    for (const p of landmarks) {
+        mpCtx.beginPath();
+        mpCtx.arc(p.x * w, p.y * h, 5, 0, Math.PI * 2);
+        mpCtx.fill();
+    }
+}
+
+// --- Sentence Builder ---
+
+function initSentenceBuilder() {
+    sentenceBuilder = new SentenceBuilder({
+        stabilityMs: 500,
+        spaceNoHandMs: 2000,
+        enterNoHandMs: 4000,
+        onLetterCommit: (letter, word) => {
+            const el = document.getElementById('buildingWord');
+            if (el) el.textContent = word;
+            if (socket && socket.connected) {
+                socket.emit('letter_committed', { room: roomId, username, letter });
+            }
+        },
+        onWordComplete: (word, allWords) => {
+            const chip = document.createElement('span');
+            chip.className = 'word-chip';
+            chip.textContent = word;
+            const chipsEl = document.getElementById('wordChips');
+            if (chipsEl) chipsEl.appendChild(chip);
+            const el = document.getElementById('buildingWord');
+            if (el) el.textContent = '';
+            if (socket && socket.connected) {
+                socket.emit('space_inserted', { room: roomId, username });
+            }
+        },
+        onSentenceComplete: (sentence, allSentences) => {
+            const div = document.createElement('div');
+            div.className = 'sentence-item own';
+            div.textContent = sentence;
+            const historyEl = document.getElementById('sentenceHistory');
+            if (historyEl) historyEl.prepend(div);
+            const chipsEl = document.getElementById('wordChips');
+            if (chipsEl) chipsEl.innerHTML = '';
+            if (socket && socket.connected) {
+                socket.emit('sentence_completed', { room: roomId, username, sentence });
+            }
+        },
+        onGesture: (gesture) => {
+            console.log('Gesture:', gesture);
+        }
+    });
+}
+
+// Manual controls
+function manualSpace() {
+    if (sentenceBuilder) sentenceBuilder.manualSpace();
+}
+function manualEnter() {
+    if (sentenceBuilder) sentenceBuilder.manualEnter();
+}
+function clearSentence() {
+    if (sentenceBuilder) sentenceBuilder.clearAll();
+    const el = document.getElementById('buildingWord');
+    if (el) el.textContent = '';
+    const chips = document.getElementById('wordChips');
+    if (chips) chips.innerHTML = '';
+}
+function speakSentence() {
+    if (!sentenceBuilder) return;
+    const state = sentenceBuilder.getState();
+    const text = state.sentences[state.sentences.length - 1] || state.buildingSentence;
+    if (!text) return;
+    if ('speechSynthesis' in window) {
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.lang = 'id-ID';
+        utterance.rate = 0.9;
+        speechSynthesis.speak(utterance);
+    }
+}
+
+// --- Remote sentence handlers ---
+
+function handleRemoteLetter(data) {
+    addChatMessage(data.username, `[letter] ${data.letter}`);
+}
+
+function handleRemoteSpace(data) {
+    addChatMessage(data.username, '[space]');
+}
+
+function handleRemoteSentence(data) {
+    const div = document.createElement('div');
+    div.className = 'sentence-item';
+    div.innerHTML = `<strong>${data.username}:</strong> ${data.sentence}`;
+    const historyEl = document.getElementById('sentenceHistory');
+    if (historyEl) historyEl.prepend(div);
+
+    // Auto-speak remote sentences
+    if ('speechSynthesis' in window) {
+        const utterance = new SpeechSynthesisUtterance(data.sentence);
+        utterance.lang = 'id-ID';
+        utterance.rate = 0.9;
+        speechSynthesis.speak(utterance);
+    }
+}
+
+// --- Exit ---
 
 function exitMeeting() {
     if (confirm('Keluar dari meeting?')) {
@@ -241,14 +528,14 @@ function exitMeeting() {
 
         document.getElementById('meetingContainer').classList.remove('active');
         document.getElementById('joinForm').style.display = 'flex';
-        predictionBuffer = [];
 
-        // Remove canvas
         if (mpCanvas && mpCanvas.parentNode) {
             mpCanvas.parentNode.removeChild(mpCanvas);
         }
     }
 }
+
+// --- Video Grid ---
 
 function updateVideoGrid() {
     const grid = document.getElementById('videoGrid');
@@ -265,6 +552,8 @@ function updateVideoGrid() {
     else if (count === 6) grid.classList.add('six');
     else grid.classList.add('many');
 }
+
+// --- Video Sharing ---
 
 function startVideoSharing() {
     if (videoShareInterval) return;
@@ -320,40 +609,7 @@ function removeVideoCard(peerName) {
     }
 }
 
-function handlePrediction(data) {
-    const overlay = document.getElementById('predictionOverlay');
-    if (overlay) {
-        overlay.textContent = data.letter;
-        overlay.style.display = 'block';
-    }
-
-    const confidenceFill = document.getElementById('confidenceFill');
-    if (confidenceFill) confidenceFill.style.width = `${data.confidence * 100}%`;
-
-    if (data.confidence > 0.5) {
-        if (predictionBuffer.length === 0 || predictionBuffer[predictionBuffer.length - 1].letter !== data.letter) {
-            predictionBuffer.push({ letter: data.letter, user: data.username });
-            if (predictionBuffer.length > 20) predictionBuffer.shift();
-            updatePredictionHistory();
-        }
-    }
-}
-
-function updatePredictionHistory() {
-    const container = document.getElementById('predictionHistory');
-    container.innerHTML = '';
-    if (predictionBuffer.length === 0) {
-        container.innerHTML = '<span style="color:var(--text-muted)">Akan muncul...</span>';
-        return;
-    }
-    predictionBuffer.forEach(p => {
-        const span = document.createElement('span');
-        span.className = 'predicted-letter';
-        span.textContent = `${p.letter}`;
-        span.title = `${p.user}: ${p.letter}`;
-        container.appendChild(span);
-    });
-}
+// --- Controls ---
 
 function toggleCamera() {
     const videoTrack = localStream?.getVideoTracks()[0];
@@ -376,6 +632,8 @@ function toggleMic() {
         btn.classList.toggle('muted', !audioTrack.enabled);
     }
 }
+
+// --- Sidebar ---
 
 function updateUsersList(users) {
     const container = document.getElementById('usersList');

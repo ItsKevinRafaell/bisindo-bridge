@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""BISINDO Webcam Inference - Smart Mode."""
+"""BISINDO Webcam Inference - Smart Mode with Sentence Building."""
 import os, json, argparse, time, numpy as np, cv2
 import torch
 import torch.nn as nn
@@ -7,6 +7,10 @@ from torch.nn import functional as F
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 from mediapipe import Image, ImageFormat
+import sys
+sys.path.append('src')
+from gesture_detector import get_hand_state
+from sentence_builder import SentenceBuilder
 
 # Letters that need 2 hands
 TWO_HAND_LETTERS = set("ABDFGHJKMNPQSTWXY")
@@ -17,10 +21,10 @@ class CNN(nn.Module):
         self.conv = nn.Sequential(
             nn.Conv1d(1, 64, 3, padding=1), nn.ReLU(), nn.MaxPool1d(2),
             nn.Conv1d(64, 128, 3, padding=1), nn.ReLU(), nn.MaxPool1d(2),
-            nn.Conv1d(128, 64, 3, padding=1), nn.ReLU(), nn.AdaptiveAvgPool1d(8)
+            nn.Conv1d(128, 64, 3, padding=1), nn.ReLU(), nn.AdaptiveAvgPool1d(1)
         )
         self.fc = nn.Sequential(
-            nn.Flatten(), nn.Linear(64*8, 128), nn.ReLU(), nn.Dropout(0.3), nn.Linear(128, num_classes)
+            nn.Flatten(), nn.Linear(64, 128), nn.ReLU(), nn.Dropout(0.3), nn.Linear(128, num_classes)
         )
     def forward(self, x):
         return self.fc(self.conv(x))
@@ -51,7 +55,7 @@ class Classifier:
         p = os.path.expanduser("~/.cache/mediapipe/models/hand_landmarker.task")
         return p if os.path.exists(p) else None
 
-    def predict(self, landmarks, num_hands=1):
+    def predict(self, landmarks, num_hands=1, confidence_threshold=0.5):
         x = np.array(landmarks, dtype=np.float32)
         x = np.nan_to_num(x)
 
@@ -65,15 +69,32 @@ class Classifier:
         conf, pred = torch.max(probs, 0)
         pred_letter = self.labels[pred.item()]
 
-        # Post-processing: C vs S disambiguation
-        # C = 1 hand, S = 2 hands
-        if pred_letter == 'S' and num_hands == 1:
-            pred_letter = 'C'
-        elif pred_letter == 'C' and num_hands == 2:
-            # Check if S has high probability
-            s_idx = self.labels.index('S') if 'S' in self.labels else -1
-            if s_idx >= 0 and probs[s_idx] > 0.3:
-                pred_letter = 'S'
+        # Confidence threshold: if too low, return None
+        if conf.item() < confidence_threshold:
+            return None
+
+        # Post-processing: disambiguate letters that look similar
+        # but differ in hand count
+        # 1-hand letters: C, E, I, L, O, R, U, V, Y, Z
+        # 2-hand letters: A, B, D, F, G, H, J, K, M, N, P, Q, S, T, W, X
+        ONE_HAND = set("CEILORUVYZ")
+        TWO_HAND = set("ABDFGHJKMNPQSTWX")
+
+        if pred_letter in TWO_HAND and num_hands == 1:
+            # Model predicts 2-hand letter but only 1 hand detected
+            # Find best 1-hand alternative
+            for i in range(len(self.labels)):
+                if self.labels[i] in ONE_HAND and probs[i] > 0.1:
+                    pred_letter = self.labels[i]
+                    break
+
+        elif pred_letter in ONE_HAND and num_hands == 2:
+            # Model predicts 1-hand letter but 2 hands detected
+            # Find best 2-hand alternative
+            for i in range(len(self.labels)):
+                if self.labels[i] in TWO_HAND and probs[i] > 0.1:
+                    pred_letter = self.labels[i]
+                    break
 
         return {
             "letter": pred_letter,
@@ -106,7 +127,7 @@ def extract(frame, detector):
     mp_img = Image(image_format=ImageFormat.SRGB, data=rgb)
     res = detector.detect(mp_img)
     if not res.hand_landmarks:
-        return None, 0
+        return None, 0, None
 
     def hand_to_xy(hand):
         return [p for pt in hand for p in [pt.x, pt.y]]
@@ -121,7 +142,9 @@ def extract(frame, detector):
         hand2 = [0.0] * 42
 
     raw = hand1 + hand2
-    return raw, len(res.hand_landmarks)
+    # Return raw landmarks for gesture detection (first hand only, 21x3 format)
+    raw_lms = [[pt.x, pt.y, pt.z] for pt in res.hand_landmarks[0]]
+    return raw, len(res.hand_landmarks), raw_lms
 
 def smart_predict(clf, lm, num_hands):
     """Smart prediction considering 1 vs 2 hands."""
@@ -161,6 +184,8 @@ def draw(frame, landmarks, num_hands, prediction=None):
     info = f"{num_hands} hand(s)"
     if prediction:
         info += f" -> {prediction['letter']} ({prediction['confidence']:.2f})"
+    else:
+        info += " -> ? (low confidence)"
     cv2.putText(frame, info, (10, h-20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
     return frame
 
@@ -168,6 +193,9 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model", default="models/dl/cnn_2hand_model.pt")
     p.add_argument("--camera", type=int, default=0)
+    p.add_argument("--connect", help="Connect to meeting server (e.g. http://localhost:4500)")
+    p.add_argument("--room", default="default", help="Room name for meeting server")
+    p.add_argument("--username", default="User", help="Username for meeting server")
     args = p.parse_args()
 
     base = args.model.replace("_model.pt", "")
@@ -176,11 +204,74 @@ def main():
     print(f"2-hand letters: {sorted(TWO_HAND_LETTERS)}")
     print("Press 'q' to quit")
 
+    # Initialize sentence builder
+    builder = SentenceBuilder(stability_ms=500, space_no_hand_ms=2000, enter_no_hand_ms=4000)
+
+    def on_letter(letter, word):
+        print(f"\n[Letter] {letter} -> word: {word}")
+        if sio:
+            sio.emit('letter_committed', {
+                'room': args.room,
+                'username': args.username,
+                'letter': letter
+            })
+
+    def on_word(word, words):
+        print(f"\n[Space] word: {word}")
+        if sio:
+            sio.emit('space_inserted', {
+                'room': args.room,
+                'username': args.username
+            })
+
+    def on_sentence(sentence, sentences):
+        print(f"\n[Sentence] {sentence}")
+        if sio:
+            sio.emit('sentence_completed', {
+                'room': args.room,
+                'username': args.username,
+                'sentence': sentence
+            })
+
+    def on_gesture(gesture):
+        print(f"\n[Gesture] {gesture}")
+
+    builder.on_letter_commit = on_letter
+    builder.on_word_complete = on_word
+    builder.on_sentence_complete = on_sentence
+    builder.on_gesture = on_gesture
+
+    # Connect to meeting server if requested
+    sio = None
+    if args.connect:
+        try:
+            import socketio
+            sio = socketio.Client()
+
+            @sio.event
+            def connect():
+                sio.emit('join', {'room': args.room, 'username': args.username})
+                print(f"Connected to meeting: {args.connect}, room: {args.room}")
+
+            @sio.on('sentence_broadcast')
+            def on_broadcast(data):
+                if data.get('username') != args.username:
+                    print(f"\n[Remote] {data['username']}: {data['sentence']}")
+
+            sio.connect(args.connect)
+        except ImportError:
+            print("python-socketio not installed, skipping meeting connection")
+        except Exception as e:
+            print(f"Failed to connect: {e}")
+
     cap = cv2.VideoCapture(args.camera)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
     t, fps = time.time(), 0
+    gesture_start = None
+    last_gesture = None
+
     while True:
         ret, frame = cap.read()
         if not ret: break
@@ -188,23 +279,77 @@ def main():
         if time.time() - t >= 1:
             t, fps = time.time(), 0
 
-        lm, num_hands = extract(frame, clf.detector)
+        lm, num_hands, raw_lms = extract(frame, clf.detector)
+
+        # Detect gesture
+        gesture = None
+        if raw_lms:
+            raw_gesture = get_hand_state(raw_lms)
+            now = time.time()
+            if raw_gesture != last_gesture:
+                last_gesture = raw_gesture
+                gesture_start = now
+            # Confirm gesture after 0.8s
+            if raw_gesture in ['fist', 'palm'] and (now - gesture_start >= 0.8):
+                gesture = raw_gesture
+
+        hand_detected = lm is not None
+
         if lm:
             r = clf.predict(lm, num_hands)
             frame = draw(frame, lm, num_hands, r)
 
-            # Show prediction
-            txt = f"{r['letter']} ({r['confidence']:.2f})"
-            color = (0, 255, 0) if r['confidence'] > 0.8 else (0, 255, 255)
-            cv2.putText(frame, txt, (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.5, color, 3)
-            print(f"\r{r['letter']}: {r['confidence']:.3f}", end="", flush=True)
+            if r is None:
+                cv2.putText(frame, "?", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 165, 255), 3)
+                print(f"\r?: low confidence", end="", flush=True)
+                # Feed to sentence builder
+                builder.feed(None, hand_detected, gesture)
+            else:
+                txt = f"{r['letter']} ({r['confidence']:.2f})"
+                color = (0, 255, 0) if r['confidence'] > 0.8 else (0, 255, 255)
+                cv2.putText(frame, txt, (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.5, color, 3)
+                print(f"\r{r['letter']}: {r['confidence']:.3f}", end="", flush=True)
+                # Feed to sentence builder
+                builder.feed(r, hand_detected, gesture)
+
+                # Emit to meeting server
+                if sio and builder.current_word:
+                    pass  # Will emit on space/enter
         else:
             cv2.putText(frame, "No hand", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            # Feed to sentence builder (no hand detected)
+            builder.feed(None, False, None)
+
+        # Display sentence state
+        state = builder.get_state()
+        building = state['building_sentence']
+        if building:
+            cv2.putText(frame, f"> {building}_", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+
+        # Display gesture indicator
+        if gesture == 'fist':
+            cv2.putText(frame, "SPACE", (550, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        elif gesture == 'palm':
+            cv2.putText(frame, "ENTER", (550, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
 
         cv2.putText(frame, f"FPS: {fps}", (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         cv2.imshow("BISINDO", frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+
+        # Check for manual space/enter
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
             break
+        elif key == ord(' '):
+            builder.manual_space()
+        elif key == 13:  # Enter key
+            builder.manual_enter()
+            # Emit sentence to meeting server
+            if sio and builder.sentences:
+                sio.emit('sentence_completed', {
+                    'room': args.room,
+                    'username': args.username,
+                    'sentence': builder.sentences[-1]
+                })
 
     cap.release()
     cv2.destroyAllWindows()

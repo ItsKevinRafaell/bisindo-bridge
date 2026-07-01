@@ -123,10 +123,10 @@ class CNN(nn.Module):
         self.conv = nn.Sequential(
             nn.Conv1d(1, 64, 3, padding=1), nn.ReLU(), nn.MaxPool1d(2),
             nn.Conv1d(64, 128, 3, padding=1), nn.ReLU(), nn.MaxPool1d(2),
-            nn.Conv1d(128, 64, 3, padding=1), nn.ReLU(), nn.AdaptiveAvgPool1d(8)
+            nn.Conv1d(128, 64, 3, padding=1), nn.ReLU(), nn.AdaptiveAvgPool1d(1)
         )
         self.fc = nn.Sequential(
-            nn.Flatten(), nn.Linear(64*8, 128), nn.ReLU(), nn.Dropout(0.3), nn.Linear(128, num_classes)
+            nn.Flatten(), nn.Linear(64, 128), nn.ReLU(), nn.Dropout(0.3), nn.Linear(128, num_classes)
         )
 
     def forward(self, x):
@@ -141,13 +141,17 @@ def train(model, train_loader, val_loader, epochs):
 
     for epoch in range(epochs):
         model.train()
+        epoch_loss = 0
+        n_batches = 0
         for X, y in train_loader:
             optimizer.zero_grad()
             loss = criterion(model(X.to(DEVICE)), y.to(DEVICE))
             loss.backward()
             optimizer.step()
+            epoch_loss += loss.item()
+            n_batches += 1
 
-        if (epoch + 1) % 10 == 0:
+        if (epoch + 1) % 1 == 0:
             model.eval()
             preds = model(X.to(DEVICE)).argmax(1)
             correct = (preds == y.to(DEVICE)).sum().item()
