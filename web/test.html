@@ -81,6 +81,11 @@ header { text-align: center; margin-bottom: 24px; }
 
 a.back { color: var(--primary); text-decoration: none; font-size: 0.9rem; }
 a.back:hover { text-decoration: underline; }
+
+@keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+#cursor { color: var(--primary); font-weight: 700; }
+#sentenceDisplay { word-break: break-word; }
+.sentence-controls .btn { padding: 8px; font-size: 0.8rem; }
 </style>
 </head>
 <body>
@@ -122,18 +127,34 @@ a.back:hover { text-decoration: underline; }
         </div>
       </div>
 
+      <div class="panel">
+        <h3>Sentence Builder</h3>
+        <div id="sentenceDisplay" style="min-height:40px;padding:8px;background:var(--surface);border-radius:8px;font-family:monospace;font-size:1.1rem;">
+          <span id="buildingWord"></span><span id="cursor" style="animation:blink 1s infinite;">_</span>
+        </div>
+        <div id="wordChips" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;"></div>
+        <div style="display:flex;gap:8px;margin-top:12px;">
+          <button class="btn btn-secondary" onclick="sentenceBuilder.manualSpace()" style="flex:1;">Space ✋</button>
+          <button class="btn btn-secondary" onclick="sentenceBuilder.manualEnter()" style="flex:1;">Enter ⏎</button>
+          <button class="btn btn-primary" onclick="speakSentence()" style="flex:1;">🔊 Speak</button>
+        </div>
+        <div id="sentenceHistory" style="margin-top:12px;max-height:120px;overflow-y:auto;"></div>
+      </div>
+
       <div class="panel info">
         <strong>Tips:</strong><br>
         • Tunjukkan 2 tangan ke kamera<br>
         • Pencahayaan cukup<br>
         • Jarak ~50cm dari kamera<br>
+        • Kepal tangan = SPACE, telapak terbuka = ENTER<br>
         • Tekan <span class="kbd">P</span> untuk pause
       </div>
     </div>
   </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/ort.min.js"></script>
+<script src="/web/js/sentence-builder.js"></script>
 <script type="module">
 import { HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/vision_bundle.mjs";
 
@@ -146,7 +167,7 @@ const top3El = document.getElementById('top3');
 const historyEl = document.getElementById('history');
 
 let handLandmarker = null;
-let model = null;
+let session = null;
 let scaler = null;
 let labels = null;
 let stream = null;
@@ -154,6 +175,10 @@ let paused = false;
 let videoTs = 0;
 let lastLetter = '';
 let lastLetterTime = 0;
+let sentenceBuilder = null;
+let lastGestureState = null;
+let gestureStartTime = 0;
+const GESTURE_CONFIRM_MS = 800;
 
 const HAND_CONNECTIONS = [
   [0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],
@@ -167,10 +192,10 @@ function setStatus(cls, text) {
 }
 
 async function loadModel() {
-  setStatus('loading', 'Loading TF.js model…');
+  setStatus('loading', 'Loading ONNX model…');
   try {
-    model = await tf.loadLayersModel('/models/model.json');
-    model.summary && console.log('Model loaded');
+    session = await ort.InferenceSession.create('/models/model.onnx');
+    console.log('ONNX model loaded');
     setStatus('loading', 'Loading scaler + labels…');
     const [scalerRes, labelsRes] = await Promise.all([
       fetch('/models/scaler.json').then(r => r.json()),
@@ -201,19 +226,91 @@ async function initMediaPipe() {
 }
 
 function landmarksToFeatures(results) {
+  // 84 features: hand1 xy (42) + hand2 xy (42), matching CNN model
   if (!results.landmarks || results.landmarks.length === 0) return null;
   const hand1 = results.landmarks[0];
   const hand1Flat = [];
-  hand1.forEach(p => hand1Flat.push(p.x, p.y, p.z));
-  while (hand1Flat.length < 63) hand1Flat.push(0);
-  let hand2Flat = new Array(63).fill(0);
+  hand1.forEach(p => hand1Flat.push(p.x, p.y));  // xy only, no z
+  while (hand1Flat.length < 42) hand1Flat.push(0);
+  let hand2Flat = new Array(42).fill(0);
   if (results.landmarks.length > 1) {
     const hand2 = results.landmarks[1];
-    hand2.forEach(p => hand2Flat.push(p.x, p.y, p.z));
-    while (hand2Flat.length > 63) hand2Flat.pop();
-    while (hand2Flat.length < 63) hand2Flat.push(0);
+    hand2Flat = [];
+    hand2.forEach(p => hand2Flat.push(p.x, p.y));
+    while (hand2Flat.length < 42) hand2Flat.push(0);
   }
   return hand1Flat.concat(hand2Flat);
+}
+
+// --- Gesture Detection (fist/palm from raw landmarks) ---
+function detectGesture(landmarks) {
+  // landmarks: array of 21 {x, y, z}
+  if (!landmarks || landmarks.length < 21) return null;
+  const wrist = landmarks[0];
+  const fingertips = [4, 8, 12, 16, 20];
+
+  // Calculate pairwise max distance for normalization
+  let maxDist = 0;
+  for (let i = 0; i < 21; i++) {
+    for (let j = i + 1; j < 21; j++) {
+      const dx = landmarks[i].x - landmarks[j].x;
+      const dy = landmarks[i].y - landmarks[j].y;
+      const dz = landmarks[i].z - landmarks[j].z;
+      const d = Math.sqrt(dx*dx + dy*dy + dz*dz);
+      if (d > maxDist) maxDist = d;
+    }
+  }
+  if (maxDist < 1e-6) return 'signing';
+
+  // Distances from fingertips to wrist (normalized)
+  const tipDists = fingertips.map(i => {
+    const dx = landmarks[i].x - wrist.x;
+    const dy = landmarks[i].y - wrist.y;
+    const dz = landmarks[i].z - wrist.z;
+    return Math.sqrt(dx*dx + dy*dy + dz*dz) / maxDist;
+  });
+
+  const meanTipDist = tipDists.reduce((a, b) => a + b, 0) / tipDists.length;
+
+  // Fist: all fingertips close to wrist
+  if (meanTipDist < 0.3) return 'fist';
+
+  // Open palm: all fingertips far from wrist AND spread apart
+  if (tipDists.every(d => d > 0.5)) {
+    const tipLandmarks = fingertips.map(i => landmarks[i]);
+    let spreadSum = 0, spreadCount = 0;
+    for (let i = 0; i < tipLandmarks.length; i++) {
+      for (let j = i + 1; j < tipLandmarks.length; j++) {
+        const dx = tipLandmarks[i].x - tipLandmarks[j].x;
+        const dy = tipLandmarks[i].y - tipLandmarks[j].y;
+        spreadSum += Math.sqrt(dx*dx + dy*dy);
+        spreadCount++;
+      }
+    }
+    const meanSpread = spreadSum / spreadCount;
+    if (meanSpread > 0.1) return 'palm';
+  }
+
+  return 'signing';
+}
+
+// --- Hand-centric normalization (same as Python) ---
+function normalizeFeaturesHandCentric(raw) {
+  function normalizeHand(arr) {
+    const wx = arr[0], wy = arr[1];
+    const centered = [];
+    for (let i = 0; i < arr.length; i += 2) {
+      centered.push(arr[i] - wx, arr[i+1] - wy);
+    }
+    let maxD = 0;
+    for (let i = 0; i < centered.length; i += 2) {
+      const d = Math.sqrt(centered[i]**2 + centered[i+1]**2);
+      if (d > maxD) maxD = d;
+    }
+    if (maxD > 0) for (let i = 0; i < centered.length; i++) centered[i] /= maxD;
+    return centered;
+  }
+  return normalizeHand(raw.slice(0, 42)).concat(normalizeHand(raw.slice(42, 84)));
 }
 
 function scale(features) {
@@ -225,12 +322,11 @@ function scale(features) {
 }
 
 async function predict(features) {
-  const xs = tf.tensor2d([features]);
-  const probs = model.predict(xs);
-  const arr = await probs.data();
-  xs.dispose();
-  probs.dispose();
-  return Array.from(arr);
+  const inputTensor = new ort.Tensor('float32', Float32Array.from(features), [1, features.length]);
+  const feeds = { input: inputTensor };
+  const results = await session.run(feeds);
+  const probs = results.output.data;
+  return Array.from(probs);
 }
 
 function renderTop3(probs) {
@@ -284,21 +380,43 @@ function pushHistory(letter) {
 }
 
 async function loop() {
-  if (!handLandmarker || !model) return;
+  if (!handLandmarker || !model || !sentenceBuilder) return;
   if (!paused && videoEl.readyState >= 2) {
     videoTs += 33;
     const results = handLandmarker.detectForVideo(videoEl, videoTs);
     ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
-    if (results.landmarks && results.landmarks.length > 0) {
+    const handDetected = results.landmarks && results.landmarks.length > 0;
+    let gestureState = null;
+    let prediction = null;
+
+    if (handDetected) {
       results.landmarks.forEach((lms, i) => drawHand(lms, i));
-      const feats = landmarksToFeatures(results);
-      if (feats) {
-        const scaled = scale(feats);
+
+      // Gesture detection on first hand (with 800ms confirmation)
+      const rawGesture = detectGesture(results.landmarks[0]);
+      const now = Date.now();
+      if (rawGesture !== lastGestureState) {
+        lastGestureState = rawGesture;
+        gestureStartTime = now;
+      }
+      // Only confirm gesture after GESTURE_CONFIRM_MS
+      if ((rawGesture === 'fist' || rawGesture === 'palm') &&
+          (now - gestureStartTime >= GESTURE_CONFIRM_MS)) {
+        gestureState = rawGesture;
+      } else {
+        gestureState = 'signing';
+      }
+
+      // CNN prediction
+      const rawFeats = landmarksToFeatures(results);
+      if (rawFeats) {
+        const normalized = normalizeFeaturesHandCentric(rawFeats);
+        const scaled = scale(normalized);
         const probs = await predict(scaled);
         const top = renderTop3(probs);
         if (top.p > 0.5) {
+          prediction = { letter: top.letter, confidence: top.p };
           predictionEl.textContent = top.letter;
-          pushHistory(top.letter);
           setStatus('detecting', `Detected: ${top.letter} (${(top.p * 100).toFixed(1)}%)`);
         } else {
           predictionEl.textContent = '?';
@@ -308,6 +426,25 @@ async function loop() {
     } else {
       predictionEl.textContent = '—';
       setStatus('ready', 'No hand detected');
+      lastGestureState = null;
+    }
+
+    // Feed to sentence builder
+    sentenceBuilder.feed(prediction, handDetected, gestureState);
+
+    // Show gesture indicator
+    if (gestureState === 'fist') {
+      ctx.fillStyle = 'rgba(239, 68, 68, 0.7)';
+      ctx.fillRect(canvasEl.width - 120, canvasEl.height - 40, 110, 30);
+      ctx.fillStyle = '#fff';
+      ctx.font = '16px Poppins';
+      ctx.fillText('✊ SPACE', canvasEl.width - 110, canvasEl.height - 18);
+    } else if (gestureState === 'palm') {
+      ctx.fillStyle = 'rgba(59, 130, 246, 0.7)';
+      ctx.fillRect(canvasEl.width - 120, canvasEl.height - 40, 110, 30);
+      ctx.fillStyle = '#fff';
+      ctx.font = '16px Poppins';
+      ctx.fillText('🖐 ENTER', canvasEl.width - 110, canvasEl.height - 18);
     }
   }
   requestAnimationFrame(loop);
@@ -341,9 +478,53 @@ document.addEventListener('keydown', e => {
   }
 });
 
+// --- Sentence Builder Integration ---
+function initSentenceBuilder() {
+  sentenceBuilder = new SentenceBuilder({
+    stabilityMs: 500,
+    spaceNoHandMs: 2000,
+    enterNoHandMs: 4000,
+    onLetterCommit: (letter, word) => {
+      document.getElementById('buildingWord').textContent = word;
+    },
+    onWordComplete: (word, allWords) => {
+      const chip = document.createElement('span');
+      chip.className = 'history-chip';
+      chip.textContent = word;
+      chip.style.background = '#10B981';
+      document.getElementById('wordChips').appendChild(chip);
+      document.getElementById('buildingWord').textContent = '';
+    },
+    onSentenceComplete: (sentence, allSentences) => {
+      const div = document.createElement('div');
+      div.style.cssText = 'padding:8px;background:#DBEAFE;border-radius:6px;margin-bottom:6px;font-family:monospace;';
+      div.textContent = sentence;
+      document.getElementById('sentenceHistory').prepend(div);
+      document.getElementById('wordChips').innerHTML = '';
+    },
+    onGesture: (gesture) => {
+      console.log('Gesture:', gesture);
+    }
+  });
+}
+
+function speakSentence() {
+  const state = sentenceBuilder.getState();
+  const text = state.sentences[state.sentences.length - 1] || state.buildingSentence;
+  if (!text) return;
+
+  if ('speechSynthesis' in window) {
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = 'id-ID';
+    utterance.rate = 0.9;
+    speechSynthesis.speak(utterance);
+  }
+}
+
 (async () => {
   try {
     await Promise.all([loadModel(), initMediaPipe()]);
+    initSentenceBuilder();
     setStatus('ready', 'Ready — click Start Camera');
   } catch (err) {
     console.error(err);

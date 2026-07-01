@@ -398,6 +398,91 @@
             cursor: pointer;
         }
 
+        /* Sentence Builder */
+        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+        .sentence-display {
+            min-height: 40px;
+            padding: 10px;
+            background: var(--surface);
+            border-radius: var(--radius);
+            font-family: 'Courier New', monospace;
+            font-size: 1.2rem;
+            font-weight: 600;
+            margin-bottom: 10px;
+            word-break: break-word;
+        }
+        .sentence-display #cursor {
+            animation: blink 1s infinite;
+            color: var(--primary);
+        }
+        .word-chips {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-bottom: 10px;
+        }
+        .word-chip {
+            background: var(--primary);
+            color: #fff;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.85rem;
+            font-weight: 500;
+        }
+        .sentence-controls {
+            display: flex;
+            gap: 6px;
+            margin-bottom: 10px;
+        }
+        .sentence-controls button {
+            flex: 1;
+            padding: 8px 12px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--surface);
+            color: var(--text);
+            font-family: 'Poppins', sans-serif;
+            font-size: 0.8rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .sentence-controls button:hover {
+            background: var(--surface-hover);
+            border-color: var(--primary);
+        }
+        .sentence-controls button.btn-speak {
+            background: var(--primary);
+            color: #fff;
+            border-color: var(--primary);
+        }
+        .sentence-controls button.btn-speak:hover {
+            background: var(--primary-dark);
+        }
+        .sentence-history {
+            max-height: 120px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .sentence-item {
+            padding: 8px 12px;
+            background: var(--surface);
+            border-radius: var(--radius);
+            font-size: 0.9rem;
+        }
+        .sentence-item.own {
+            background: #DBEAFE;
+            border-left: 3px solid var(--primary);
+        }
+        .model-status {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            text-align: center;
+            padding: 4px;
+        }
+
         /* Responsive */
         @media (max-width: 900px) {
             .meeting-container.active { grid-template-columns: 1fr; }
@@ -466,6 +551,22 @@
 
             <div class="sidebar">
                 <div class="panel">
+                    <h3><i class="fas fa-comment-dots"></i> Kalimat</h3>
+                    <div class="sentence-display">
+                        <span id="buildingWord"></span><span id="cursor" style="animation: blink 1s infinite;">|</span>
+                    </div>
+                    <div class="word-chips" id="wordChips"></div>
+                    <div class="sentence-controls">
+                        <button onclick="manualSpace()">Space ✋</button>
+                        <button onclick="manualEnter()">Enter ⏎</button>
+                        <button class="btn-speak" onclick="speakSentence()">🔊 Speak</button>
+                        <button onclick="clearSentence()">Clear</button>
+                    </div>
+                    <div class="sentence-history" id="sentenceHistory"></div>
+                    <div class="model-status" id="modelStatus">Loading model...</div>
+                </div>
+
+                <div class="panel">
                     <h3><i class="fas fa-hands"></i> Prediksi</h3>
                     <div class="prediction-history" id="predictionHistory">
                         <span style="color:var(--text-muted)">Akan muncul...</span>
@@ -494,6 +595,8 @@
 
     <link rel="icon" href="data:,">
     <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/ort.min.js"></script>
+    <script src="/static/js/sentence-builder.js"></script>
     <script src="/static/js/meeting.js"></script>
 </body>
 </html>

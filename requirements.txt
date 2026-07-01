@@ -17,3 +17,9 @@ scikit-learn>=1.3.0
 
 # Text-to-Speech
 gTTS>=2.3.0
+
+# SocketIO (for webcam client to connect to meeting server)
+python-socketio>=5.0.0
+
+# ONNX (for model conversion to browser format)
+onnx>=1.15.0
