@@ -284,7 +284,7 @@ def main():
         # Detect gesture
         gesture = None
         if raw_lms:
-            raw_gesture = get_hand_state(raw_lms)
+            raw_gesture = get_hand_state(raw_lms, num_hands)
             now = time.time()
             if raw_gesture != last_gesture:
                 last_gesture = raw_gesture

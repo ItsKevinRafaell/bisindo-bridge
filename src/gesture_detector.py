@@ -43,19 +43,26 @@ def _normalize_by_hand_size(landmarks: np.ndarray, distances: np.ndarray) -> np.
     return distances / max_distance
 
 
-def is_fist(landmarks_21x3: Union[np.ndarray, List]) -> bool:
+def is_fist(landmarks_21x3: Union[np.ndarray, List], num_hands_detected: int = 1) -> bool:
     """
     Detect if hand is making a fist.
 
     A fist is detected when all fingertips (indices 4, 8, 12, 16, 20) are close
     to the wrist (index 0).
 
+    NOTE: Only trigger if 1 hand detected. 2 hands with fist = letter G.
+
     Args:
         landmarks_21x3: 21 landmarks × 3 coordinates (x, y, z)
+        num_hands_detected: Number of hands detected (1 or 2)
 
     Returns:
         True if fist detected, False otherwise
     """
+    # Skip if 2 hands detected (that's letter G)
+    if num_hands_detected >= 2:
+        return False
+
     if landmarks_21x3 is None or len(landmarks_21x3) == 0:
         return False
 
@@ -75,19 +82,26 @@ def is_fist(landmarks_21x3: Union[np.ndarray, List]) -> bool:
     return mean_distance < 0.3
 
 
-def is_open_palm(landmarks_21x3: Union[np.ndarray, List]) -> bool:
+def is_open_palm(landmarks_21x3: Union[np.ndarray, List], num_hands_detected: int = 1) -> bool:
     """
     Detect if hand is showing an open palm.
 
     An open palm is detected when all fingertips are far from the wrist AND
     spread apart from each other.
 
+    NOTE: Only trigger if 1 hand detected. 2 hands with open palm = letter H.
+
     Args:
         landmarks_21x3: 21 landmarks × 3 coordinates (x, y, z)
+        num_hands_detected: Number of hands detected (1 or 2)
 
     Returns:
         True if open palm detected, False otherwise
     """
+    # Skip if 2 hands detected (that's letter H)
+    if num_hands_detected >= 2:
+        return False
+
     if landmarks_21x3 is None or len(landmarks_21x3) == 0:
         return False
 
@@ -120,12 +134,13 @@ def is_open_palm(landmarks_21x3: Union[np.ndarray, List]) -> bool:
     return mean_spread > 0.1
 
 
-def get_hand_state(landmarks_21x3: Optional[Union[np.ndarray, List]]) -> str:
+def get_hand_state(landmarks_21x3: Optional[Union[np.ndarray, List]], num_hands_detected: int = 1) -> str:
     """
     Determine the current hand state based on landmarks.
 
     Args:
         landmarks_21x3: 21 landmarks × 3 coordinates, or None
+        num_hands_detected: Number of hands detected (1 or 2)
 
     Returns:
         One of: "fist", "palm", "signing", "none"
@@ -134,11 +149,11 @@ def get_hand_state(landmarks_21x3: Optional[Union[np.ndarray, List]]) -> str:
         return "none"
 
     # Check fist first (highest priority)
-    if is_fist(landmarks_21x3):
+    if is_fist(landmarks_21x3, num_hands_detected):
         return "fist"
 
     # Check open palm
-    if is_open_palm(landmarks_21x3):
+    if is_open_palm(landmarks_21x3, num_hands_detected):
         return "palm"
 
     # If hand is detected but not fist or palm, it's signing
