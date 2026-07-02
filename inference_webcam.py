@@ -205,7 +205,7 @@ def main():
     print("Press 'q' to quit")
 
     # Initialize sentence builder
-    builder = SentenceBuilder(stability_ms=500, space_no_hand_ms=2000, enter_no_hand_ms=4000)
+    builder = SentenceBuilder(stability_ms=500, space_no_hand_ms=2000, enter_no_hand_ms=4000, gesture_hold_ms=2000)
 
     def on_letter(letter, word):
         print(f"\n[Letter] {letter} -> word: {word}")
@@ -283,6 +283,7 @@ def main():
 
         # Detect gesture
         gesture = None
+        raw_gesture = None
         if raw_lms:
             raw_gesture = get_hand_state(raw_lms, num_hands)
             now = time.time()
@@ -295,29 +296,40 @@ def main():
 
         hand_detected = lm is not None
 
+        # Debug output
+        if raw_lms:
+            print(f"\rHands: {num_hands}, Raw gesture: {raw_gesture}, Confirmed: {gesture}", end="", flush=True)
+
         if lm:
-            r = clf.predict(lm, num_hands)
-            frame = draw(frame, lm, num_hands, r)
-
-            if r is None:
-                cv2.putText(frame, "?", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 165, 255), 3)
-                print(f"\r?: low confidence", end="", flush=True)
-                # Feed to sentence builder
-                builder.feed(None, hand_detected, gesture)
+            # If raw gesture is fist/palm, skip letter prediction entirely
+            # (even before hold confirmation, to prevent false letters like Q/I)
+            if raw_gesture in ['fist', 'palm']:
+                # Feed raw_gesture immediately so builder can track hold time
+                builder.feed(None, hand_detected, raw_gesture)
+                state_label = gesture.upper() if gesture else 'HOLDING...'
+                cv2.putText(frame, f"Gesture: {state_label}", (10, 40),
+                           cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 0, 255), 3)
             else:
-                txt = f"{r['letter']} ({r['confidence']:.2f})"
-                color = (0, 255, 0) if r['confidence'] > 0.8 else (0, 255, 255)
-                cv2.putText(frame, txt, (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.5, color, 3)
-                print(f"\r{r['letter']}: {r['confidence']:.3f}", end="", flush=True)
-                # Feed to sentence builder
-                builder.feed(r, hand_detected, gesture)
+                # Normal prediction
+                r = clf.predict(lm, num_hands)
+                frame = draw(frame, lm, num_hands, r)
 
-                # Emit to meeting server
-                if sio and builder.current_word:
-                    pass  # Will emit on space/enter
+                if r is None:
+                    cv2.putText(frame, "?", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 165, 255), 3)
+                    print(f"\r?: low confidence", end="", flush=True)
+                    builder.feed(None, hand_detected, gesture)
+                else:
+                    txt = f"{r['letter']} ({r['confidence']:.2f})"
+                    color = (0, 255, 0) if r['confidence'] > 0.8 else (0, 255, 255)
+                    cv2.putText(frame, txt, (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.5, color, 3)
+                    print(f"\r{r['letter']}: {r['confidence']:.3f}", end="", flush=True)
+                    builder.feed(r, hand_detected, gesture)
+
+                    # Emit to meeting server
+                    if sio and builder.current_word:
+                        pass  # Will emit on space/enter
         else:
             cv2.putText(frame, "No hand", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-            # Feed to sentence builder (no hand detected)
             builder.feed(None, False, None)
 
         # Display sentence state

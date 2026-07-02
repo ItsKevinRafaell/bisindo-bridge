@@ -178,7 +178,7 @@ let lastLetterTime = 0;
 let sentenceBuilder = null;
 let lastGestureState = null;
 let gestureStartTime = 0;
-const GESTURE_CONFIRM_MS = 800;
+const GESTURE_CONFIRM_MS = 1500;
 
 const HAND_CONNECTIONS = [
   [0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],
@@ -243,7 +243,7 @@ function landmarksToFeatures(results) {
 }
 
 // --- Gesture Detection (fist/palm from raw landmarks) ---
-function detectGesture(landmarks) {
+function detectGesture(landmarks, numHands = 1) {
   // landmarks: array of 21 {x, y, z}
   if (!landmarks || landmarks.length < 21) return null;
   const wrist = landmarks[0];
@@ -272,11 +272,11 @@ function detectGesture(landmarks) {
 
   const meanTipDist = tipDists.reduce((a, b) => a + b, 0) / tipDists.length;
 
-  // Fist: all fingertips close to wrist
-  if (meanTipDist < 0.3) return 'fist';
+  // Fist: all fingertips close to wrist (only with 1 hand - 2 hands = letter G)
+  if (meanTipDist < 0.3 && numHands < 2) return 'fist';
 
-  // Open palm: all fingertips far from wrist AND spread apart
-  if (tipDists.every(d => d > 0.5)) {
+  // Open palm: all fingertips far from wrist AND spread apart (only with 1 hand - 2 hands = letter H)
+  if (tipDists.every(d => d > 0.5) && numHands < 2) {
     const tipLandmarks = fingertips.map(i => landmarks[i]);
     let spreadSum = 0, spreadCount = 0;
     for (let i = 0; i < tipLandmarks.length; i++) {
@@ -392,8 +392,8 @@ async function loop() {
     if (handDetected) {
       results.landmarks.forEach((lms, i) => drawHand(lms, i));
 
-      // Gesture detection on first hand (with 800ms confirmation)
-      const rawGesture = detectGesture(results.landmarks[0]);
+      // Gesture detection on first hand (with 1500ms confirmation)
+      const rawGesture = detectGesture(results.landmarks[0], results.landmarks.length);
       const now = Date.now();
       if (rawGesture !== lastGestureState) {
         lastGestureState = rawGesture;
@@ -407,21 +407,30 @@ async function loop() {
         gestureState = 'signing';
       }
 
+      // Skip CNN prediction immediately if rawGesture is fist/palm (even before confirmation)
+      // This prevents Q/I from being detected when doing backspace/delete
+      const shouldPredict = (rawGesture !== 'fist' && rawGesture !== 'palm');
+
       // CNN prediction
-      const rawFeats = landmarksToFeatures(results);
-      if (rawFeats) {
-        const normalized = normalizeFeaturesHandCentric(rawFeats);
-        const scaled = scale(normalized);
-        const probs = await predict(scaled);
-        const top = renderTop3(probs);
-        if (top.p > 0.5) {
-          prediction = { letter: top.letter, confidence: top.p };
-          predictionEl.textContent = top.letter;
-          setStatus('detecting', `Detected: ${top.letter} (${(top.p * 100).toFixed(1)}%)`);
-        } else {
-          predictionEl.textContent = '?';
-          setStatus('ready', 'Hand detected — confidence low');
+      if (shouldPredict) {
+        const rawFeats = landmarksToFeatures(results);
+        if (rawFeats) {
+          const normalized = normalizeFeaturesHandCentric(rawFeats);
+          const scaled = scale(normalized);
+          const probs = await predict(scaled);
+          const top = renderTop3(probs);
+          if (top.p > 0.5) {
+            prediction = { letter: top.letter, confidence: top.p };
+            predictionEl.textContent = top.letter;
+            setStatus('detecting', `Detected: ${top.letter} (${(top.p * 100).toFixed(1)}%)`);
+          } else {
+            predictionEl.textContent = '?';
+            setStatus('ready', 'Hand detected — confidence low');
+          }
         }
+      } else {
+        predictionEl.textContent = '✋';
+        setStatus('ready', 'Gesture detected — hold to activate');
       }
     } else {
       predictionEl.textContent = '—';

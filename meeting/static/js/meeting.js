@@ -28,7 +28,7 @@ let modelLoaded = false;
 let sentenceBuilder = null;
 let lastGestureState = null;
 let gestureStartTime = 0;
-const GESTURE_CONFIRM_MS = 800;
+const GESTURE_CONFIRM_MS = 1500;
 
 const HAND_CONNECTIONS = [
     [0,1],[1,2],[2,3],[3,4],
@@ -172,8 +172,11 @@ async function predictModel(features) {
 
 // --- Gesture Detection ---
 
-function detectGesture(landmarks) {
+function detectGesture(landmarks, numHands = 1) {
     if (!landmarks || landmarks.length < 21) return null;
+    // 2 hands with fist = letter G, 2 hands with palm = letter H
+    // So we only trigger backspace/delete gestures with 1 hand
+    if (numHands >= 2) return 'signing';
     const wrist = landmarks[0];
     const fingertips = [4, 8, 12, 16, 20];
 
@@ -332,8 +335,8 @@ function processResults(results) {
         // Draw landmarks
         results.landmarks.forEach((lms, handIdx) => drawHand(lms, handIdx));
 
-        // Gesture detection with 800ms confirmation
-        const rawGesture = detectGesture(results.landmarks[0]);
+        // Gesture detection with 1500ms confirmation
+        const rawGesture = detectGesture(results.landmarks[0], results.landmarks.length);
         const now = Date.now();
         if (rawGesture !== lastGestureState) {
             lastGestureState = rawGesture;
@@ -346,8 +349,17 @@ function processResults(results) {
             gestureState = 'signing';
         }
 
-        // CNN prediction (if model loaded)
-        if (modelLoaded) {
+        // Skip CNN prediction immediately if rawGesture is fist/palm (even before confirmation)
+        // This prevents Q/I from being detected when doing backspace/delete
+        const isGesture = rawGesture === 'fist' || rawGesture === 'palm';
+        const shouldSkipPrediction = isGesture && results.landmarks.length === 1;
+
+        // Determine which gesture state to pass to SentenceBuilder
+        // Use rawGesture for gesture hold tracking, gestureState for space/enter
+        const gestureForBuilder = shouldSkipPrediction ? rawGesture : gestureState;
+
+        // CNN prediction (if model loaded and not skipping)
+        if (modelLoaded && !shouldSkipPrediction) {
             const rawFeats = landmarksToFeatures(results);
             if (rawFeats) {
                 const normalized = normalizeFeaturesHandCentric(rawFeats);
@@ -370,10 +382,13 @@ function processResults(results) {
 
                     // Feed to sentence builder
                     if (sentenceBuilder) {
-                        sentenceBuilder.feed(prediction, handDetected, gestureState);
+                        sentenceBuilder.feed(prediction, handDetected, gestureForBuilder);
                     }
                 });
             }
+        } else if (sentenceBuilder && shouldSkipPrediction) {
+            // Feed gesture without prediction (for backspace/delete tracking)
+            sentenceBuilder.feed(null, handDetected, gestureForBuilder);
         }
 
         // Show gesture indicator on canvas
@@ -382,13 +397,13 @@ function processResults(results) {
             mpCtx.fillRect(mpCanvas.width - 120, mpCanvas.height - 40, 110, 30);
             mpCtx.fillStyle = '#fff';
             mpCtx.font = '16px Poppins';
-            mpCtx.fillText('✊ SPACE', mpCanvas.width - 110, mpCanvas.height - 18);
+            mpCtx.fillText('✊ BACKSPACE', mpCanvas.width - 110, mpCanvas.height - 18);
         } else if (gestureState === 'palm') {
             mpCtx.fillStyle = 'rgba(59, 130, 246, 0.7)';
             mpCtx.fillRect(mpCanvas.width - 120, mpCanvas.height - 40, 110, 30);
             mpCtx.fillStyle = '#fff';
             mpCtx.font = '16px Poppins';
-            mpCtx.fillText('🖐 ENTER', mpCanvas.width - 110, mpCanvas.height - 18);
+            mpCtx.fillText('🖐 DELETE', mpCanvas.width - 110, mpCanvas.height - 18);
         }
     } else {
         lastGestureState = null;
@@ -424,6 +439,7 @@ function drawHand(landmarks, handIdx) {
 
 function initSentenceBuilder() {
     sentenceBuilder = new SentenceBuilder({
+        gestureHoldMs: 2000,  // 2 seconds hold for backspace/delete
         stabilityMs: 500,
         spaceNoHandMs: 2000,
         enterNoHandMs: 4000,
