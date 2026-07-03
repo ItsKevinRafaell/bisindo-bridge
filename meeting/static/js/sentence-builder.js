@@ -44,6 +44,8 @@ class SentenceBuilder {
     feed(prediction, handDetected, gestureState) {
         const now = Date.now();
 
+        console.log(`[SentenceBuilder] feed: hand=${handDetected}, gesture=${gestureState}, currentGesture=${this.currentGesture}, word="${this.currentWord}"`);
+
         if (!handDetected) {
             // Timer-based space/enter
             const noHandDuration = now - this.lastHandTime;
@@ -64,27 +66,34 @@ class SentenceBuilder {
         if (gestureState === 'fist' || gestureState === 'palm') {
             if (gestureState !== this.currentGesture) {
                 // New gesture started
+                console.log(`[SentenceBuilder] New gesture started: ${gestureState}`);
                 this.currentGesture = gestureState;
                 this.gestureStartTime = now;
                 this.gestureTriggered = false;
             } else {
                 // Same gesture continuing
                 const gestureDuration = now - this.gestureStartTime;
+                console.log(`[SentenceBuilder] Gesture hold: ${gestureState} for ${gestureDuration}ms (need ${this.gestureHoldMs}ms), triggered=${this.gestureTriggered}`);
 
                 // Trigger action after hold time
                 if (gestureDuration >= this.gestureHoldMs && !this.gestureTriggered) {
                     this.gestureTriggered = true;
+                    console.log(`[SentenceBuilder] Gesture triggered! Duration: ${gestureDuration}ms`);
 
                     if (gestureState === 'fist') {
                         // Fist hold = backspace (delete last letter)
+                        console.log(`[SentenceBuilder] Calling backspace(), currentWord="${this.currentWord}"`);
                         this.backspace();
                         this.onGesture('backspace');
                         this.onBackspace(this.currentWord);
+                        console.log(`[SentenceBuilder] After backspace: currentWord="${this.currentWord}"`);
                     } else if (gestureState === 'palm') {
                         // Palm hold = delete word
+                        console.log(`[SentenceBuilder] Calling deleteWord(), currentWord="${this.currentWord}"`);
                         this.deleteWord();
                         this.onGesture('delete_word');
                         this.onDeleteWord(this.currentWord);
+                        console.log(`[SentenceBuilder] After deleteWord: currentWord="${this.currentWord}"`);
                     }
                 }
             }

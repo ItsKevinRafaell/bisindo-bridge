@@ -41,3 +41,5 @@ cron.log
 # Temp
 *.tmp
 *.bak
+meeting/cloudflared.deb
+dataset/
