@@ -418,18 +418,24 @@ def on_join(data):
     room_id = data.get('room', 'default')
     username = data.get('username', 'Anonymous')
     join_room(room_id)
-    rooms.setdefault(room_id, {'users': [], 'history': []})['users'].append({'username': username})
-    emit('room_info', {'room': room_id, 'users': rooms[room_id]['users']}, room=room_id)
-    emit('user_joined', {'username': username, 'users': rooms[room_id]['users']}, room=room_id, include_self=False)
+    users_list = rooms.setdefault(room_id, {'users': [], 'history': []})['users']
+    users_list.append({'username': username, 'sid': request.sid})
+    emit('room_info', {'room': room_id, 'users': users_list}, room=room_id)
+    emit('user_joined', {
+        'username': username,
+        'sid': request.sid,
+        'users': users_list
+    }, room=room_id, include_self=False)
 
 @socketio.on('leave')
 def on_leave(data):
     room_id = data.get('room', 'default')
     username = data.get('username', 'Anonymous')
+    sid = request.sid
     leave_room(room_id)
     if room_id in rooms:
         rooms[room_id]['users'] = [u for u in rooms[room_id]['users'] if u['username'] != username]
-    emit('user_left', {'username': username}, room=room_id)
+    emit('user_left', {'username': username, 'sid': sid}, room=room_id)
 
 @socketio.on('text_message')
 def on_text_message(data):
@@ -437,13 +443,71 @@ def on_text_message(data):
     username = data.get('username', 'Anonymous')
     emit('chat_message', {'username': username, 'message': data.get('message', '')}, room=room_id)
 
-@socketio.on('video_frame')
-def on_video_frame(data):
-    room_id = data.get('room', 'default')
-    username = data.get('username', 'unknown')
-    frame_data = data.get('frame', '')
-    if room_id and frame_data:
-        emit('video_frame', {'username': username, 'frame': frame_data}, room=room_id, include_self=False)
+# ---- SocketIO: WebRTC signaling ----
+@socketio.on('webrtc_offer')
+def on_webrtc_offer(data):
+    """Relay SDP offer from one peer to another."""
+    emit('webrtc_offer', {
+        'fromSid': request.sid,
+        'fromUsername': data.get('username'),
+        'sdp': data['sdp']
+    }, to=data['targetSid'])
+
+
+@socketio.on('webrtc_answer')
+def on_webrtc_answer(data):
+    """Relay SDP answer from one peer to another."""
+    emit('webrtc_answer', {
+        'fromSid': request.sid,
+        'sdp': data['sdp']
+    }, to=data['targetSid'])
+
+
+@socketio.on('webrtc_ice')
+def on_webrtc_ice(data):
+    """Relay ICE candidate between peers."""
+    emit('webrtc_ice', {
+        'fromSid': request.sid,
+        'candidate': data['candidate']
+    }, to=data['targetSid'])
+
+
+# ---- SocketIO: hand raise + reactions ----
+@socketio.on('hand_raise')
+def on_hand_raise(data):
+    emit('hand_raise', {
+        'username': data.get('username'),
+        'sid': request.sid
+    }, room=data.get('room'), include_self=False)
+
+
+@socketio.on('hand_lower')
+def on_hand_lower(data):
+    emit('hand_lower', {
+        'username': data.get('username'),
+        'sid': request.sid
+    }, room=data.get('room'), include_self=False)
+
+
+@socketio.on('reaction')
+def on_reaction(data):
+    emit('reaction', {
+        'username': data.get('username'),
+        'emoji': data.get('emoji'),
+        'sid': request.sid
+    }, room=data.get('room'), include_self=False)
+
+
+@socketio.on('peer_state')
+def on_peer_state(data):
+    """Broadcast mic/cam state changes to peers."""
+    emit('peer_state', {
+        'sid': request.sid,
+        'username': data.get('username'),
+        'mic': data.get('mic'),
+        'cam': data.get('cam')
+    }, room=data.get('room'), include_self=False)
+
 
 @socketio.on('predict_landmarks')
 def on_predict_landmarks(data):
@@ -597,9 +661,55 @@ def get_local_ip():
         return "127.0.0.1"
 
 
+def start_cloudflared_tunnel(port, enabled=True):
+    """Start Cloudflare Quick Tunnel for public HTTPS access."""
+    if not enabled:
+        return None
+
+    try:
+        proc = subprocess.Popen(
+            ['cloudflared', 'tunnel', '--url', f'http://localhost:{port}'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+
+        # Read stderr to find tunnel URL (cloudflared outputs to stderr)
+        import threading
+        tunnel_url = None
+
+        def read_output():
+            nonlocal tunnel_url
+            for line in proc.stderr:
+                if '.trycloudflare.com' in line:
+                    # Extract URL from line like: "https://xxx-xxx.trycloudflare.com | ..."
+                    import re
+                    match = re.search(r'https://[^\s|]+', line)
+                    if match:
+                        tunnel_url = match.group(0)
+                        log.info(f"   🌐 Tunnel: {tunnel_url}")
+                        break
+
+        thread = threading.Thread(target=read_output, daemon=True)
+        thread.start()
+
+        # Give it a moment to start
+        import time
+        time.sleep(2)
+
+        return proc, tunnel_url
+    except FileNotFoundError:
+        log.warning("cloudflared not found, skipping tunnel")
+        return None
+    except Exception as e:
+        log.warning(f"Tunnel failed: {e}")
+        return None
+
+
 if __name__ == '__main__':
     host = os.environ.get('BISINDO_HOST', '127.0.0.1')
     port = int(os.environ.get('BISINDO_PORT', '4500'))
+    enable_tunnel = os.environ.get('BISINDO_TUNNEL', '1') == '1'
 
     init_classifier()
     load_existing_training_data()
@@ -609,4 +719,17 @@ if __name__ == '__main__':
     log.info(f"   Capture: POST {host}:{port}/api/sample")
     log.info(f"   Stats:   GET  {host}:{port}/api/stats")
     log.info(f"   Train:   POST {host}:{port}/api/train")
+
+    # Start Cloudflare tunnel
+    tunnel_result = start_cloudflared_tunnel(port, enabled=enable_tunnel)
+    if tunnel_result:
+        proc, tunnel_url = tunnel_result
+
+        # Cleanup on exit
+        import atexit
+        def cleanup():
+            if proc and proc.poll() is None:
+                proc.terminate()
+        atexit.register(cleanup)
+
     socketio.run(app, host=host, port=port, debug=False, allow_unsafe_werkzeug=True)
