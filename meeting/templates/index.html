@@ -287,7 +287,9 @@
             display: grid;
             gap: 8px;
             flex: 1;
-            align-content: center;
+            align-content: start;
+            overflow-y: auto;
+            padding-bottom: 20px;
         }
 
         .video-grid.cols-1 { grid-template-columns: 1fr; max-width: 800px; margin: 0 auto; width: 100%; }
@@ -297,43 +299,33 @@
         .video-grid.cols-5, .video-grid.cols-6 { grid-template-columns: repeat(3, 1fr); }
         .video-grid.cols-7, .video-grid.cols-8, .video-grid.cols-9 { grid-template-columns: repeat(3, 1fr); grid-template-rows: repeat(3, 1fr); }
 
-        /* Speaker View */
-        .video-area.speaker-view {
+        /* Speaker View — pure CSS grid, no DOM manipulation */
+        .video-area.speaker-view .video-grid {
+            display: grid;
+            grid-template-columns: repeat(6, 1fr);
+            grid-template-rows: 1fr auto;
             gap: 8px;
-        }
-
-        .video-area.speaker-view .main-speaker {
             flex: 1;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            overflow: hidden;
+            align-content: start;
         }
 
-        .video-area.speaker-view .main-speaker .video-card {
-            width: 100%;
-            max-height: 100%;
-            aspect-ratio: 16/9;
+        /* Speaker card: spans all 6 columns, takes most space */
+        .video-area.speaker-view .video-grid .video-card.speaker-main {
+            grid-column: 1 / -1;
+            grid-row: 1;
+            max-height: calc(100vh - 250px);
         }
 
-        .video-area.speaker-view .filmstrip {
-            display: flex;
-            gap: 8px;
-            overflow-x: auto;
-            padding: 4px 0;
-            flex-shrink: 0;
-        }
-
-        .video-area.speaker-view .filmstrip .video-card {
-            width: 180px;
-            aspect-ratio: 16/9;
-            flex-shrink: 0;
+        /* Filmstrip cards: small thumbnails in bottom row */
+        .video-area.speaker-view .video-grid .video-card.speaker-thumb {
+            grid-row: 2;
+            max-height: 120px;
             cursor: pointer;
-            transition: transform 0.15s;
+            transition: transform 0.15s, border-color 0.2s;
         }
 
-        .video-area.speaker-view .filmstrip .video-card:hover {
-            transform: scale(1.05);
+        .video-area.speaker-view .video-grid .video-card.speaker-thumb:hover {
+            transform: scale(1.03);
         }
 
         /* Video Card */
@@ -344,7 +336,54 @@
             background: #000;
             border: 2px solid transparent;
             transition: border-color 0.3s, box-shadow 0.3s;
+            aspect-ratio: 16/9;
+            min-height: 180px;
         }
+
+        /* BISINDO active — own card */
+        .video-card.local.bisindo-on {
+            border-color: #2ecc71;
+            box-shadow: 0 0 0 2px #2ecc71, 0 0 24px rgba(46, 204, 113, 0.4);
+            animation: bisindo-pulse 2s ease-in-out infinite;
+        }
+        @keyframes bisindo-pulse {
+            0%, 100% { box-shadow: 0 0 0 2px #2ecc71, 0 0 24px rgba(46, 204, 113, 0.4); }
+            50%      { box-shadow: 0 0 0 2px #2ecc71, 0 0 36px rgba(46, 204, 113, 0.6); }
+        }
+
+        /* BISINDO active — remote card (small green dot top-right) */
+        .video-card.peer-bisindo-on::before {
+            content: '';
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #2ecc71;
+            box-shadow: 0 0 8px rgba(46, 204, 113, 0.8);
+            z-index: 5;
+        }
+
+        /* BISINDO confidence chip in sidebar */
+        .bisindo-conf {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+            background: var(--surface);
+            color: var(--text-muted);
+            margin-left: 8px;
+            transition: background 0.2s, color 0.2s;
+        }
+        .bisindo-conf.high { background: rgba(46, 204, 113, 0.2); color: #2ecc71; }
+        .bisindo-conf.mid  { background: rgba(241, 196, 15, 0.2); color: #f1c40f; }
+        .bisindo-conf.low  { background: rgba(231, 76, 60, 0.2); color: #e74c3c; }
+
+        /* TTS toggle button (sidebar) */
+        .tts-btn { background: var(--surface); border: 1px solid var(--border); }
+        .tts-btn.on { background: rgba(46, 204, 113, 0.2); border-color: #2ecc71; color: #2ecc71; }
 
         .video-card video {
             width: 100%;
@@ -959,6 +998,74 @@
             padding: 4px;
         }
 
+        /* ========== MODAL ========== */
+        .modal-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.6);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+
+        .modal-box {
+            background: var(--surface);
+            border-radius: var(--radius-lg);
+            padding: 32px;
+            max-width: 400px;
+            width: 90%;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }
+
+        .modal-box h3 {
+            font-size: 1.3rem;
+            font-weight: 600;
+            color: var(--text);
+            margin-bottom: 12px;
+        }
+
+        .modal-box p {
+            color: var(--text-muted);
+            margin-bottom: 24px;
+            font-size: 0.95rem;
+        }
+
+        .modal-actions {
+            display: flex;
+            gap: 12px;
+            justify-content: flex-end;
+        }
+
+        .modal-actions button {
+            padding: 10px 24px;
+            border-radius: var(--radius);
+            font-family: 'Poppins', sans-serif;
+            font-size: 0.95rem;
+            font-weight: 500;
+            cursor: pointer;
+            border: none;
+            transition: all 0.2s;
+        }
+
+        .btn-secondary {
+            background: var(--surface-hover);
+            color: var(--text);
+        }
+
+        .btn-secondary:hover {
+            background: var(--surface-active);
+        }
+
+        .btn-danger {
+            background: var(--danger-solid);
+            color: #fff;
+        }
+
+        .btn-danger:hover {
+            background: #d33426;
+        }
+
         /* ========== FULLSCREEN ========== */
         :fullscreen .meeting-topbar,
         :fullscreen .control-bar {
@@ -1157,8 +1264,8 @@
                         <span class="tooltip">Participants</span>
                         <i class="fas fa-users"></i>
                     </button>
-                    <button class="ctrl-btn" id="bisindoBtn" onclick="togglePanel('bisindo')">
-                        <span class="tooltip">BISINDO</span>
+                    <button class="ctrl-btn off" id="bisindoBtn" onclick="toggleBisindo()">
+                        <span class="tooltip">BISINDO (Toggle)</span>
                         <i class="fas fa-hands"></i>
                     </button>
                     <button class="ctrl-btn" id="layoutBtn" onclick="toggleLayout()">
@@ -1183,6 +1290,18 @@
                     <button class="reaction-btn" onclick="sendReaction('👏')">👏</button>
                     <button class="reaction-btn" onclick="sendReaction('🎉')">🎉</button>
                     <button class="reaction-btn" onclick="sendReaction('😮')">😮</button>
+                </div>
+            </div>
+
+            <!-- Exit Modal -->
+            <div class="modal-overlay" id="exitModal" style="display:none;">
+                <div class="modal-box">
+                    <h3>Keluar dari meeting?</h3>
+                    <p>Anda akan meninggalkan meeting ini.</p>
+                    <div class="modal-actions">
+                        <button class="btn-secondary" onclick="closeExitModal()">Batal</button>
+                        <button class="btn-danger" onclick="confirmExit()">Keluar</button>
+                    </div>
                 </div>
             </div>
 
@@ -1238,12 +1357,15 @@
                             </div>
 
                             <div class="bisindo-section">
-                                <h4>Prediksi</h4>
+                                <h4>Prediksi <span class="bisindo-conf" id="bisindoConfidence">—</span></h4>
                                 <div class="prediction-display">
                                     <span class="prediction-letter" id="predLetter">-</span>
                                     <div class="confidence-bar">
                                         <div class="confidence-fill" id="confidenceFill" style="width:0%"></div>
                                     </div>
+                                </div>
+                                <div class="sentence-btns" style="margin-top:8px;">
+                                    <button class="tts-btn" id="bisindoTtsBtn" onclick="toggleBisindoTTS()" title="Speak completed sentences aloud (browser TTS)">🔊 TTS off</button>
                                 </div>
                             </div>
 
@@ -1262,9 +1384,9 @@
 
     <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/ort.min.js"></script>
-    <script src="/static/config.js"></script>
-    <script src="/static/js/peer-manager.js"></script>
-    <script src="/static/js/sentence-builder.js"></script>
-    <script src="/static/js/meeting.js"></script>
+    <script src="/static/config.js?v=3"></script>
+    <script src="/static/js/peer-manager.js?v=3"></script>
+    <script src="/static/js/sentence-builder.js?v=3"></script>
+    <script src="/static/js/meeting.js?v=3"></script>
 </body>
 </html>

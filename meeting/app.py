@@ -22,6 +22,7 @@ import csv
 import shutil
 import socket
 import subprocess
+import secrets
 import json
 import threading
 import tempfile
@@ -49,9 +50,10 @@ BACKUP_INTERVAL = 2000  # backup CSV every 2000 samples
 
 # ---- Config ----
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'bisindo-meeting-secret-2026'
-CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+app.config['SECRET_KEY'] = os.environ.get('BISINDO_SECRET_KEY') or secrets.token_urlsafe(32)
+_cors_origins = [o.strip() for o in os.environ.get('BISINDO_CORS_ORIGINS', '*').split(',') if o.strip()]
+CORS(app, origins=_cors_origins)
+socketio = SocketIO(app, cors_allowed_origins=_cors_origins, async_mode='threading')
 
 HEADER = ["letter", "image_path", "split", "num_hands", "contributor"]
 HEADER += [f"lm{i}_{c}" for i in range(21) for c in ("x", "y", "z")]
@@ -68,6 +70,7 @@ TRAIN_TARGET = 5000  # target samples per letter
 # In-memory state
 training_data = {}   # letter -> [{landmarks, hand_count, contributor, from_csv}]
 rooms = {}
+ROOMS_LOCK = threading.RLock()
 train_users = {}
 contributor_stats = {}
 letter_counters = {}  # letter -> int (next index, avoids reading CSV every capture)
@@ -240,6 +243,38 @@ def train_page():
 def capture_page():
     return render_template('capture.html')
 
+@app.route('/api/turn')
+def api_turn():
+    """Return TURN credentials for WebRTC relay.
+
+    TURN credentials are read from the environment (never hard-coded in the
+    client). Supported providers:
+      - Cloudflare Calls: BISINDO_TURN_URL (e.g. turn:turn.cloudflare.com:3478),
+        BISINDO_TURN_USERNAME, BISINDO_TURN_CREDENTIAL
+      - Any RFC-5766 TURN: same vars, or BISINDO_TURN_URL as a comma list.
+
+    If unset, returns an empty list and the client falls back to built-in ICE_SERVERS (STUN + public free TURN)
+    (works for peers that can traverse NAT without relay).
+    """
+    urls = (os.environ.get('BISINDO_TURN_URL') or '').strip()
+    if not urls:
+        return jsonify({'iceServers': []})
+    servers = []
+    for u in urls.split(','):
+        u = u.strip()
+        if not u:
+            continue
+        entry = {'urls': u}
+        user = os.environ.get('BISINDO_TURN_USERNAME')
+        cred = os.environ.get('BISINDO_TURN_CREDENTIAL')
+        if user:
+            entry['username'] = user
+        if cred:
+            entry['credential'] = cred
+        servers.append(entry)
+    return jsonify({'iceServers': servers})
+
+
 @app.route('/api/health')
 def api_health():
     counts = {l: letter_counters.get(l, 0) for l in LETTERS}
@@ -409,33 +444,110 @@ def api_train():
 def on_connect():
     emit('connected', {'sid': request.sid})
 
+
+def _remove_sid_from_rooms(sid, broadcast=True):
+    """Drop sid from every room user list. Prevents ghost/duplicate.
+    Also leaves SocketIO room and prunes empty rooms (audit fix)."""
+    to_clean = []
+    with ROOMS_LOCK:
+        for room_id, room in list(rooms.items()):
+            users = room.get('users') or []
+            kept = []
+            removed = []
+            for u in users:
+                if u.get('sid') == sid:
+                    removed.append(u)
+                else:
+                    kept.append(u)
+            if not removed:
+                continue
+            room['users'] = kept
+            to_clean.append((room_id, removed, list(kept)))
+            if not room['users']:
+                rooms.pop(room_id, None)
+    for room_id, removed, kept in to_clean:
+        try:
+            leave_room(room_id)
+        except Exception:
+            pass
+        if broadcast:
+            for u in removed:
+                try:
+                    emit('user_left', {
+                        'username': u.get('username', 'Anonymous'),
+                        'sid': sid,
+                        'users': kept,
+                    }, room=room_id)
+                except Exception:
+                    pass
+
+
+def _add_user_to_room(room_id, sid, username):
+    """Atomic add with sid dedup only (NOT username — same username = different person)."""
+    with ROOMS_LOCK:
+        room = rooms.setdefault(room_id, {'users': [], 'history': []})
+        users_list = room['users']
+        # Dedup by sid ONLY — allow same username from different devices
+        users_list[:] = [u for u in users_list if u.get('sid') != sid]
+        entry = {'username': username, 'sid': sid}
+        users_list.append(entry)
+        return list(users_list)
+
+
+def _remove_user_from_room(room_id, sid):
+    with ROOMS_LOCK:
+        if room_id not in rooms:
+            return []
+        rooms[room_id]['users'] = [
+            u for u in rooms[room_id]['users'] if u.get('sid') != sid
+        ]
+        kept = list(rooms[room_id]['users'])
+        if not kept:
+            rooms.pop(room_id, None)
+        return kept
+
+
+def _get_room_users(room_id):
+    with ROOMS_LOCK:
+        return list(rooms.get(room_id, {}).get('users', []))
+
+
 @socketio.on('disconnect')
 def on_disconnect():
-    pass
+    sid = request.sid
+    _remove_sid_from_rooms(sid, broadcast=True)
+    # Audit fix: train_users leak
+    try:
+        train_users.pop(sid, None)
+    except Exception:
+        pass
+
 
 @socketio.on('join')
 def on_join(data):
-    room_id = data.get('room', 'default')
-    username = data.get('username', 'Anonymous')
+    room_id = (data.get('room') or 'default').strip()
+    username = (data.get('username') or 'Anonymous').strip() or 'Anonymous'
+    sid = request.sid
     join_room(room_id)
-    users_list = rooms.setdefault(room_id, {'users': [], 'history': []})['users']
-    users_list.append({'username': username, 'sid': request.sid})
-    emit('room_info', {'room': room_id, 'users': users_list}, room=room_id)
+    # Atomic dedup by both sid and username — handles reconnect with new sid
+    all_users = _add_user_to_room(room_id, sid, username)
+    # Send full roster only to the joiner (avoids stomping others' UI mid-call)
+    emit('room_info', {'room': room_id, 'users': all_users, 'selfSid': sid})
     emit('user_joined', {
         'username': username,
-        'sid': request.sid,
-        'users': users_list
+        'sid': sid,
+        'users': all_users,
     }, room=room_id, include_self=False)
+
 
 @socketio.on('leave')
 def on_leave(data):
-    room_id = data.get('room', 'default')
+    room_id = (data.get('room') or 'default').strip()
     username = data.get('username', 'Anonymous')
     sid = request.sid
     leave_room(room_id)
-    if room_id in rooms:
-        rooms[room_id]['users'] = [u for u in rooms[room_id]['users'] if u['username'] != username]
-    emit('user_left', {'username': username, 'sid': sid}, room=room_id)
+    kept = _remove_user_from_room(room_id, sid)
+    emit('user_left', {'username': username, 'sid': sid, 'users': kept}, room=room_id)
 
 @socketio.on('text_message')
 def on_text_message(data):
@@ -509,6 +621,17 @@ def on_peer_state(data):
     }, room=data.get('room'), include_self=False)
 
 
+@socketio.on('bisindo_state')
+def on_bisindo_state(data):
+    """Broadcast BISINDO on/off indicator for peer cards (green dot)."""
+    room_id = data.get('room') or 'default'
+    emit('bisindo_state', {
+        'username': data.get('username', 'Anonymous'),
+        'sid': request.sid,
+        'enabled': bool(data.get('enabled')),
+    }, room=room_id, include_self=False)
+
+
 @socketio.on('predict_landmarks')
 def on_predict_landmarks(data):
     """Client sends 63 floats (1 hand, normalized). Pad to 126 for the model."""
@@ -538,6 +661,7 @@ def on_letter_committed(data):
     emit('letter_committed', {
         'username': data.get('username', 'unknown'),
         'letter': data.get('letter', ''),
+        't_sent': data.get('t_sent'),
     }, room=room_id, include_self=False)
 
 
@@ -604,8 +728,6 @@ def on_capture_landmark(data):
         return
 
     hand1 = list(landmarks[0])
-    if len(hand1) != 63:
-        return
     if len(hand1) != 63:
         return
     try:
@@ -706,9 +828,41 @@ def start_cloudflared_tunnel(port, enabled=True):
         return None
 
 
+def start_sfu_server(sfu_port=4501):
+    """Start the SFU (Selective Forwarding Unit) Node.js server."""
+    sfu_dir = os.path.join(BASE_DIR, 'sfu')
+    sfu_script = os.path.join(sfu_dir, 'server.js')
+    if not os.path.exists(sfu_script):
+        log.warning(f"SFU script not found at {sfu_script}, skipping SFU")
+        return None
+    try:
+        proc = subprocess.Popen(
+            ['node', sfu_script],
+            cwd=sfu_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True
+        )
+        log.info(f"   SFU:     ws://localhost:{sfu_port}")
+
+        def read_sfu_output():
+            for line in proc.stdout:
+                log.info(f"[SFU] {line.rstrip()}")
+
+        threading.Thread(target=read_sfu_output, daemon=True).start()
+        return proc
+    except FileNotFoundError:
+        log.warning("node not found, cannot start SFU server")
+        return None
+    except Exception as e:
+        log.warning(f"SFU start failed: {e}")
+        return None
+
+
 if __name__ == '__main__':
     host = os.environ.get('BISINDO_HOST', '127.0.0.1')
     port = int(os.environ.get('BISINDO_PORT', '4500'))
+    sfu_port = int(os.environ.get('BISINDO_SFU_PORT', '4501'))
     enable_tunnel = os.environ.get('BISINDO_TUNNEL', '1') == '1'
 
     init_classifier()
@@ -720,16 +874,31 @@ if __name__ == '__main__':
     log.info(f"   Stats:   GET  {host}:{port}/api/stats")
     log.info(f"   Train:   POST {host}:{port}/api/train")
 
+    # Start SFU server (only if explicitly enabled; needs a public UDP-reachable
+    # host, which a NAT LXC VPS is not — leave off here to save RAM/disk).
+    sfu_proc = None
+    if os.environ.get('BISINDO_ENABLE_SFU') == '1':
+        sfu_proc = start_sfu_server(sfu_port)
+
     # Start Cloudflare tunnel
     tunnel_result = start_cloudflared_tunnel(port, enabled=enable_tunnel)
+    tunnel_proc = None
     if tunnel_result:
-        proc, tunnel_url = tunnel_result
+        tunnel_proc, tunnel_url = tunnel_result
 
-        # Cleanup on exit
-        import atexit
-        def cleanup():
-            if proc and proc.poll() is None:
-                proc.terminate()
-        atexit.register(cleanup)
+    # Cleanup on exit
+    def cleanup():
+        if sfu_proc and sfu_proc.poll() is None:
+            log.info("Shutting down SFU server...")
+            sfu_proc.terminate()
+        if tunnel_proc and tunnel_proc.poll() is None:
+            log.info("Shutting down Cloudflare tunnel...")
+            tunnel_proc.terminate()
+    atexit.register(cleanup)
 
-    socketio.run(app, host=host, port=port, debug=False, allow_unsafe_werkzeug=True)
+    _socketio_kwargs = {'host': host, 'port': port, 'debug': False}
+    # This deployment uses the Werkzeug server as a lightweight signaling
+    # relay (SocketIO only). Set BISINDO_ALLOW_UNSAFE_WERKZEUG=0 to refuse.
+    if os.environ.get('BISINDO_ALLOW_UNSAFE_WERKZEUG', '1') == '1':
+        _socketio_kwargs['allow_unsafe_werkzeug'] = True
+    socketio.run(app, **_socketio_kwargs)

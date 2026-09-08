@@ -42,4 +42,10 @@ cron.log
 *.tmp
 *.bak
 meeting/cloudflared.deb
+meeting/*.deb
+meeting/node_modules/
+meeting/sfu/node_modules/
 dataset/
+
+# Agent / local tooling
+.claude/

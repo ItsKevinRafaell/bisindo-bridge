@@ -14,6 +14,7 @@ let peerManager = null;
 let micEnabled = true;
 let camEnabled = true;
 let handRaised = false;
+let bisindoEnabled = false; // BISINDO detection off by default
 let currentLayout = 'gallery'; // 'gallery' | 'speaker'
 let pinnedSpeakerSid = null;
 let activeSpeakerSid = null;
@@ -22,6 +23,11 @@ let timerInterval = null;
 let sidePanelOpen = false;
 let activeTab = 'chat';
 let unreadChatCount = 0;
+
+// Peers already present when we joined (used to fix the join race). Set by
+// room_info, consumed right after PeerManager is created in joinMeeting().
+let pendingRoomPeers = null;
+let selfSid = null; // authoritative sid from server room_info.selfSid
 
 // Audio analysis for active speaker
 const audioContexts = new Map(); // sid → { analyser, dataArray }
@@ -63,6 +69,18 @@ const HAND_CONNECTIONS = [
 document.addEventListener('DOMContentLoaded', async () => {
     const saved = localStorage.getItem('bisindo_username');
     if (saved) document.getElementById('username').value = saved;
+
+    // Auto-fill room ID from URL param or path
+    const urlParams = new URLSearchParams(window.location.search);
+    const roomParam = urlParams.get('room') || urlParams.get('room_id');
+    const pathMatch = window.location.pathname.match(/^\/room\/(.+)$/);
+    const roomIdInput = document.getElementById('roomId');
+    if (roomParam) {
+        roomIdInput.value = roomParam;
+    } else if (pathMatch && pathMatch[1]) {
+        roomIdInput.value = decodeURIComponent(pathMatch[1]);
+    }
+
     initPreview();
 });
 
@@ -80,9 +98,25 @@ async function initPreview() {
         previewVideo.srcObject = localStream;
         previewVideo.style.display = '';
         previewNoCam.style.display = 'none';
+        errorEl.style.display = 'none';
     } catch (err) {
         console.error('Camera error:', err);
-        errorEl.textContent = 'Tidak bisa akses kamera/mic. Pastikan izin browser sudah diberikan.';
+
+        // Specific error messages by getUserMedia error type
+        let msg;
+        if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+            msg = '⛔ Izin ditolak. Klik ikon 🔒 di address bar → Camera + Microphone → Allow, lalu refresh halaman.';
+        } else if (err.name === 'NotFoundError' || err.name === 'OverconstrainedError') {
+            msg = '📷 Kamera/mic tidak ditemukan. Pastikan device terpasang dan tidak dipakai aplikasi lain (Zoom, Meet, OBS).';
+        } else if (err.name === 'NotReadableError') {
+            msg = '🔒 Kamera/mic dipakai aplikasi lain. Tutup Zoom/Meet/OBS lalu refresh.';
+        } else if (err.name === 'SecurityError') {
+            msg = '🔐 Halaman harus diakses via HTTPS atau localhost. Coba akses lewat tunnel Cloudflare (HTTPS).';
+        } else {
+            msg = `⚠️ Tidak bisa akses kamera/mic: ${err.name}. Coba refresh atau ganti browser.`;
+        }
+
+        errorEl.textContent = msg;
         errorEl.style.display = 'block';
         previewVideo.style.display = 'none';
         previewNoCam.style.display = 'flex';
@@ -90,7 +124,8 @@ async function initPreview() {
         // Try audio-only
         try {
             localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            previewAvatar.textContent = '?';
+            previewAvatar.textContent = '🎤';
+            errorEl.textContent += ' (mic-only mode)';
         } catch (e2) {
             // No media at all
             localStream = new MediaStream();
@@ -161,8 +196,24 @@ async function joinMeeting() {
     // Init SocketIO
     initSocket();
 
-    // Init WebRTC
-    peerManager = new PeerManager(socket, localStream, roomId, username);
+    // Init WebRTC — fetch optional TURN credentials first so peers behind
+    // restrictive NAT (CGNAT, campus WiFi) can still connect via relay.
+    let iceServers = ICE_SERVERS;
+    try {
+        const turnRes = await fetch('/api/turn');
+        if (!turnRes.ok) throw new Error('turn http ' + turnRes.status);
+        const turnJson = await turnRes.json();
+        if (turnJson && Array.isArray(turnJson.iceServers) && turnJson.iceServers.length) {
+            iceServers = ICE_SERVERS.concat(turnJson.iceServers);
+            console.log(`[meeting] Loaded ${turnJson.iceServers.length} TURN server(s) from /api/turn — total ICE=${iceServers.length}`);
+        } else {
+            console.log(`[meeting] /api/turn empty — using built-in ICE (STUN+public TURN), count=${ICE_SERVERS.length}`);
+        }
+    } catch (e) {
+        console.warn(`[meeting] /api/turn fetch failed, using built-in ICE (STUN+public TURN) count=${ICE_SERVERS.length}:`, e);
+    }
+
+    peerManager = new PeerManager(socket, localStream, roomId, username, iceServers);
     peerManager.onRemoteStream = (sid, peerUsername, stream) => {
         showRemoteStream(sid, peerUsername, stream);
         setupAudioDetection(sid, stream);
@@ -172,21 +223,47 @@ async function joinMeeting() {
         cleanupAudioDetection(sid);
     };
 
-    // Init hand tracking
-    initHandLandmarker();
+    // Init hand tracking - await to ensure proper initialization
+    await initHandLandmarker();
     initSentenceBuilder();
 
     // Update mic/cam state
     updateMicCamUI();
+
+    // FIX (join race): if we joined an already-populated room, the server's
+    // room_info already lists the peers present. Connect to each of them now so
+    // we don't wait forever for an offer that was sent before we finished
+    // joining. (connectToPeer is idempotent and only offers if our SID is lower.)
+    if (Array.isArray(pendingRoomPeers)) {
+        for (const u of pendingRoomPeers) {
+            if (u.sid && u.sid !== selfSid && u.sid !== socket.id) {
+                peerManager.connectToPeer(u.sid, u.username);
+            }
+        }
+        pendingRoomPeers = null;
+    }
 }
 
 function initSocket() {
     socket = io(SERVER_URL);
 
+    // Guard: socket.io auto-reconnect re-fires 'connect' with new id.
+    // Treat as full rejoin only if selfSid differs.
     socket.on('connect', () => {
-        console.log('Connected to server');
+        console.log('Connected to server, sid=', socket.id);
+        // If this is a reconnect (socket.id changed vs known selfSid), purge
+        // stale peer state before re-joining to avoid duplicate cards.
+        if (socket.id && selfSid && socket.id !== selfSid) {
+            console.log(`[meeting] Reconnect detected ${selfSid} -> ${socket.id}, cleaning stale peers`);
+            if (peerManager) peerManager.handleReconnectCleanup();
+            for (const key of peerStates.keys()) peerStates.delete(key);
+            for (const key of audioContexts.keys()) {
+                try { audioContexts.get(key).audioCtx.close(); } catch {}
+                audioContexts.delete(key);
+            }
+            document.querySelectorAll('.video-card:not(.local)').forEach(c => c.remove());
+        }
         socket.emit('join', { room: roomId, username });
-        // Broadcast initial state
         broadcastPeerState();
     });
 
@@ -194,49 +271,77 @@ function initSocket() {
 
     socket.on('room_info', (data) => {
         roomId = data.room;
+        selfSid = data.selfSid || socket.id;
         document.getElementById('topbarRoom').textContent = data.room;
         updatePeopleList(data.users);
+        // Peers already in room (exclude self). Connect ASAP if PeerManager ready;
+        // otherwise stash for joinMeeting() (join race fix).
+        const peers = (data.users || []).filter(u => u.sid && u.sid !== selfSid && u.sid !== socket.id);
+        if (peerManager) {
+            for (const u of peers) {
+                peerManager.connectToPeer(u.sid, u.username);
+            }
+            pendingRoomPeers = null;
+        } else {
+            pendingRoomPeers = peers;
+        }
+        setTimeout(retryPendingPeers, 1000);
+        setTimeout(retryPendingPeers, 3000);
+        setTimeout(retryPendingPeers, 6000);
     });
 
     socket.on('user_joined', (data) => {
+        // Ignore own echo (include_self=False should prevent, but guard anyway)
+        if (data.sid === selfSid || data.sid === socket.id) return;
         addChatMessage('System', `${data.username} joined`);
-        updatePeopleList(data.users);
+        if (data.users) updatePeopleList(data.users);
 
         if (peerManager && data.sid) {
             peerManager.connectToPeer(data.sid, data.username);
         }
-
-        // Auto-downgrade: disable video if >6 peers
-        if (peerManager && peerManager.peers.size > 6) {
-            const videoTrack = localStream.getVideoTracks()[0];
-            if (videoTrack) {
-                videoTrack.enabled = false;
-                camEnabled = false;
-                updateMicCamUI();
-                addChatMessage('System', 'Video disabled (too many peers for stability)');
-            }
-        }
     });
 
     socket.on('user_left', (data) => {
+        // Own leave echoed? ignore
+        if (data.sid === selfSid && data.username === username) {
+            // but still allow UI cleanup — handled elsewhere
+        }
         addChatMessage('System', `${data.username} left`);
-        updatePeopleList(data.users);
+        if (data.users) {
+            updatePeopleList(data.users);
+        } else {
+            // Fallback: drop by sid from UI if server omitted full list
+            const kept = (window.__lastPeopleList || []).filter(u => u.sid !== data.sid);
+            // Also purge by username to kill ghost with new sid
+            const kept2 = kept.filter(u => u.username !== data.username || u.sid === data.sid);
+            // Actually simplest: re-render dropping that sid
+            updatePeopleList((window.__lastPeopleList || []).filter(u => u.sid !== data.sid));
+        }
 
-        if (peerManager) {
-            for (const [sid, peer] of peerManager.peers) {
-                if (peer.username === data.username) {
-                    peerManager.handlePeerDisconnect(sid);
-                    break;
-                }
-            }
+        if (peerManager && data.sid) {
+            peerManager.handlePeerDisconnect(data.sid);
         }
         peerStates.delete(data.sid);
+        const ac = audioContexts.get(data.sid);
+        if (ac) { try { ac.audioCtx.close(); } catch {} }
         audioContexts.delete(data.sid);
     });
 
     // BISINDO events
     socket.on('letter_committed', (data) => {
         if (data.username !== username) handleRemoteLetter(data);
+    });
+
+    // Remote peer BISINDO state (visual indicator on their card)
+    socket.on('bisindo_state', (data) => {
+        if (!data || !data.username || data.username === username) return;
+        // Find their card by username (not SID, since state is username-keyed)
+        document.querySelectorAll('.video-card').forEach(card => {
+            const label = card.querySelector('.video-label span:last-child');
+            if (label && label.textContent.trim() === data.username) {
+                card.classList.toggle('peer-bisindo-on', !!data.enabled);
+            }
+        });
     });
 
     socket.on('space_inserted', (data) => {
@@ -256,13 +361,14 @@ function initSocket() {
         }
     });
 
-    // Hand raise events
+    // Hand raise events — render from cached list, do not rebuild with undefined
     socket.on('hand_raise', (data) => {
         const state = peerStates.get(data.sid) || {};
         state.handRaised = true;
         peerStates.set(data.sid, state);
         updateHandBadge(data.sid, true);
-        updatePeopleList();
+        if (window.__lastPeopleList) updatePeopleList(window.__lastPeopleList);
+        else updatePeopleListIconsOnly();
         addChatMessage('System', `${data.username} raised hand ✋`);
     });
 
@@ -271,7 +377,8 @@ function initSocket() {
         state.handRaised = false;
         peerStates.set(data.sid, state);
         updateHandBadge(data.sid, false);
-        updatePeopleList();
+        if (window.__lastPeopleList) updatePeopleList(window.__lastPeopleList);
+        else updatePeopleListIconsOnly();
     });
 
     // Reaction events
@@ -287,7 +394,8 @@ function initSocket() {
         peerStates.set(data.sid, state);
         updatePeerMicIcon(data.sid, data.mic);
         updatePeerCamState(data.sid, data.cam);
-        updatePeopleList();
+        if (window.__lastPeopleList) updatePeopleList(window.__lastPeopleList);
+        else updatePeopleListIconsOnly();
     });
 }
 
@@ -348,7 +456,7 @@ function showRemoteStream(sid, peerUsername, stream) {
         card.className = 'video-card';
         card.id = 'card_' + sid;
         card.innerHTML = `
-            <video autoplay playsinline></video>
+            <video autoplay playsinline muted></video>
             <div class="camera-off" style="display:none;">
                 <div class="avatar">${(peerUsername || '?')[0].toUpperCase()}</div>
             </div>
@@ -364,13 +472,78 @@ function showRemoteStream(sid, peerUsername, stream) {
             </div>
         `;
         card.addEventListener('dblclick', () => pinSpeaker(sid));
+        // Click to unmute audio — required by Chrome autoplay policy
+        card.addEventListener('click', () => {
+            const v = card.querySelector('video');
+            if (v && v.muted) {
+                v.muted = false;
+                v.play().catch(()=>{});
+                console.log('[meeting] unmuted video for', peerUsername);
+            }
+        });
         grid.appendChild(card);
     }
 
     const video = card.querySelector('video');
     if (video) {
+        const tryPlay = () => {
+            if (video.paused || video.readyState < 2) {
+                const pr = video.play();
+                if (pr && typeof pr.catch === 'function') {
+                    pr.catch(() => {
+                        video.muted = true;
+                        video.play().catch(()=>{});
+                    });
+                }
+            }
+        };
+        if (video._tryPlay) {
+            try { video.removeEventListener('loadedmetadata', video._tryPlay); } catch(_){}
+        }
+        video._tryPlay = tryPlay;
+        video.addEventListener('loadedmetadata', tryPlay, { once: true });
+        video.addEventListener('loadeddata', tryPlay, { once: true });
+
+        // Always reassign srcObject to trigger reload
+        try { video.srcObject = null; } catch(_){}
         video.srcObject = stream;
-        video.play().catch(err => console.warn('Video play failed:', err));
+        tryPlay();
+
+        // Unmute after user gesture window (join click counts as gesture)
+        // Keep trying for 5 seconds — TURN relay may arrive late
+        let unmuteAttempts = 0;
+        const tryUnmute = () => {
+            if (video.muted && stream.getAudioTracks().length > 0 && video.readyState >= 2) {
+                video.muted = false;
+                video.play().then(()=>{
+                    console.log('[meeting] unmuted audio for', peerUsername, 'attempt', unmuteAttempts);
+                }).catch(()=>{
+                    video.muted = true;
+                    if (unmuteAttempts < 5) {
+                        unmuteAttempts++;
+                        setTimeout(tryUnmute, 500);
+                    }
+                });
+            }
+        };
+        setTimeout(tryUnmute, 300);
+        setTimeout(tryUnmute, 1000);
+        setTimeout(tryUnmute, 2000);
+
+        // Handle later added tracks
+        if (stream) {
+            const prev = stream._origOnAddTrack || null;
+            stream._origOnAddTrack = prev;
+            stream.onaddtrack = (ev) => {
+                if (typeof prev === 'function') prev(ev);
+                if (!ev || !ev.track) return;
+                console.log('[meeting] onaddtrack', ev.track.kind, 'for', peerUsername);
+                if (ev.track.kind === 'video' && video.paused) tryPlay();
+                if (ev.track.kind === 'audio') {
+                    setTimeout(tryUnmute, 300);
+                }
+            };
+        }
     }
 
     // Track peer state
@@ -512,28 +685,15 @@ function applyLayout() {
     } else {
         videoArea.classList.remove('speaker-view');
         videoArea.classList.add('gallery-view');
-        // Remove any speaker view elements
-        const mainSpeaker = document.querySelector('.main-speaker');
-        const filmstrip = document.querySelector('.filmstrip');
-        if (mainSpeaker) mainSpeaker.remove();
-        if (filmstrip) filmstrip.remove();
-        grid.style.display = '';
+        // Remove speaker classes from all cards
+        grid.querySelectorAll('.video-card').forEach(card => {
+            card.classList.remove('speaker-main', 'speaker-thumb');
+        });
     }
 }
 
 function updateSpeakerView() {
     const grid = document.getElementById('videoGrid');
-    const videoArea = document.getElementById('videoArea');
-
-    // Hide the grid
-    grid.style.display = 'none';
-
-    // Remove old speaker view elements
-    const oldMain = videoArea.querySelector('.main-speaker');
-    const oldFilm = videoArea.querySelector('.filmstrip');
-    if (oldMain) oldMain.remove();
-    if (oldFilm) oldFilm.remove();
-
     const cards = Array.from(grid.querySelectorAll('.video-card'));
     if (cards.length === 0) return;
 
@@ -546,21 +706,16 @@ function updateSpeakerView() {
     }
     if (!mainCard) mainCard = cards[0];
 
-    // Create main speaker area
-    const mainSpeaker = document.createElement('div');
-    mainSpeaker.className = 'main-speaker';
-    mainSpeaker.appendChild(mainCard.cloneNode(true));
-    videoArea.insertBefore(mainSpeaker, grid);
-
-    // Create filmstrip
-    const filmstrip = document.createElement('div');
-    filmstrip.className = 'filmstrip';
+    // Apply CSS classes - pure CSS grid handles the layout
     cards.forEach(card => {
-        if (card !== mainCard) {
-            filmstrip.appendChild(card.cloneNode(true));
+        if (card === mainCard) {
+            card.classList.add('speaker-main');
+            card.classList.remove('speaker-thumb');
+        } else {
+            card.classList.add('speaker-thumb');
+            card.classList.remove('speaker-main');
         }
     });
-    videoArea.insertBefore(filmstrip, grid);
 }
 
 function pinSpeaker(sid) {
@@ -592,12 +747,15 @@ function toggleCamera() {
         updateMicCamUI();
         broadcastPeerState();
 
-        // Toggle detection
+        // Toggle detection — only if BISINDO is explicitly enabled
         if (!camEnabled) {
             detectionActive = false;
-        } else {
+        } else if (bisindoEnabled) {
             detectionActive = true;
             runDetection();
+        } else {
+            // BISINDO is off, don't start detection
+            detectionActive = false;
         }
     }
 }
@@ -725,8 +883,7 @@ function toggleReactions(event) {
 }
 
 function sendReaction(emoji) {
-    // Close popup
-    document.getElementById('reactionsPopup').classList.remove('open');
+    // Keep popup open for spam
 
     // Show locally
     showFloatingReaction(emoji, username);
@@ -852,7 +1009,7 @@ function sendMessage() {
     const msg = input.value.trim();
     if (!msg || !socket || !socket.connected) return;
     socket.emit('text_message', { room: roomId, username, message: msg, timestamp: new Date().toISOString() });
-    addChatMessage(username, msg);
+    // Don't add locally - server broadcasts to everyone including sender
     input.value = '';
 }
 
@@ -860,25 +1017,62 @@ function sendMessage() {
 // PEOPLE LIST
 // ============================================================
 
+
+    // Retry connect for any peer not yet in peerConnections (fix rata-rata video ga masuk)
+    function retryPendingPeers() {
+        if (!peerManager) return;
+        const allCards = document.querySelectorAll('.video-card:not(.local)');
+        // Check last people list
+        const list = window.__lastPeopleList || pendingRoomPeers || [];
+        for (const u of list) {
+            if (!u || !u.sid) continue;
+            if (u.sid === selfSid || u.sid === socket.id) continue;
+            if (!peerManager.peerConnections.has(u.sid)) {
+                console.log('[meeting] retry connect to', u.username, u.sid.slice(0,6));
+                peerManager.connectToPeer(u.sid, u.username);
+            }
+        }
+        // Also if offer was missed, force reconnect for existing PCs that are still new/connecting after 5s
+        for (const [sid, pc] of peerManager.peerConnections.entries()) {
+            const st = pc.connectionState;
+            if (st === 'new' || st === 'connecting') {
+                // If we are lower sid we should have waited, but try force offer after timeout
+                if (pc.iceConnectionState === 'new' || pc.iceConnectionState === 'checking') {
+                    // let it continue, but log
+                    console.log(`[meeting] still ${st}/${pc.iceConnectionState} for ${sid.slice(0,6)}`);
+                }
+            }
+        }
+    }
+    // Schedule retries 1s, 3s, 6s after room_info
+
 function updatePeopleList(users) {
     const container = document.getElementById('peopleList');
     if (!container) return;
 
-    // Build list from users array + peer states
-    const allUsers = users || [];
+    const seen = new Set();
+    const allUsers = [];
+    for (const u of (users || [])) {
+        if (!u || !u.sid) continue;
+        if (seen.has(u.sid)) continue;
+        seen.add(u.sid);
+        allUsers.push(u);
+    }
+    window.__lastPeopleList = allUsers;
     container.innerHTML = '';
 
     allUsers.forEach(u => {
         const sid = u.sid;
         const state = peerStates.get(sid) || { mic: true, cam: true, handRaised: false };
-        const isLocal = u.username === username;
+        const isLocal = sid === selfSid || sid === (socket && socket.id);
 
         const div = document.createElement('div');
         div.className = 'person-item';
+        const safeName = String(u.username || '?').replace(/[<>&"]/g, '');
         div.innerHTML = `
-            <div class="person-avatar">${(u.username || '?')[0].toUpperCase()}</div>
+            <div class="person-avatar">${(safeName || '?')[0].toUpperCase()}</div>
             <div class="person-info">
-                <div class="person-name">${u.username}${isLocal ? ' (You)' : ''}</div>
+                <div class="person-name">${safeName}${isLocal ? ' (You)' : ''}</div>
                 <div class="person-status">
                     <i class="fas fa-microphone ${state.mic === false ? 'muted' : ''}"></i>
                     <i class="fas fa-video ${state.cam === false ? 'muted' : ''}"></i>
@@ -889,7 +1083,22 @@ function updatePeopleList(users) {
         container.appendChild(div);
     });
 
-    document.getElementById('participantCount').textContent = allUsers.length;
+    const countEl = document.getElementById('participantCount');
+    if (countEl) countEl.textContent = allUsers.length;
+}
+
+function updatePeopleListIconsOnly() {
+    // Refresh icons without touching roster (used when only mic/cam/hand changed)
+    const allUsers = window.__lastPeopleList || [];
+    const container = document.getElementById('peopleList');
+    if (!container) return;
+    allUsers.forEach(u => {
+        const state = peerStates.get(u.sid);
+        if (!state) return;
+        // Update via DOM walk would be more efficient, but re-render small list
+    });
+    // Delegate to full render using cached list
+    updatePeopleList(allUsers);
 }
 
 // ============================================================
@@ -957,34 +1166,75 @@ function updateTimer() {
 // ============================================================
 
 function exitMeeting() {
-    if (confirm('Keluar dari meeting?')) {
-        detectionActive = false;
-        if (timerInterval) clearInterval(timerInterval);
+    // Show custom exit modal instead of browser confirm()
+    const modal = document.getElementById('exitModal');
+    if (modal) modal.style.display = 'flex';
+}
 
-        if (socket) {
-            socket.emit('leave', { room: roomId, username });
-            socket.disconnect();
-        }
-        if (peerManager) {
-            peerManager.destroy();
-            peerManager = null;
-        }
-        if (localStream) localStream.getTracks().forEach(track => track.stop());
+function closeExitModal() {
+    const modal = document.getElementById('exitModal');
+    if (modal) modal.style.display = 'none';
+}
 
-        // Cleanup audio contexts
-        audioContexts.forEach((ctx) => ctx.audioCtx.close());
-        audioContexts.clear();
+function confirmExit() {
+    // Hide modal
+    const modal = document.getElementById('exitModal');
+    if (modal) modal.style.display = 'none';
 
-        // Reset state
-        peerStates.clear();
-        activeSpeakerSid = null;
-        pinnedSpeakerSid = null;
-        handRaised = false;
+    // Stop all detection and processing
+    detectionActive = false;
+    bisindoEnabled = false;
 
-        // Switch screens
-        document.getElementById('meetingScreen').classList.remove('active');
-        document.getElementById('preJoinScreen').style.display = 'flex';
+    // Stop MediaPipe hand landmarker
+    if (handLandmarker) {
+        handLandmarker.close();
+        handLandmarker = null;
     }
+
+    // Stop timer
+    if (timerInterval) clearInterval(timerInterval);
+
+    // Disconnect main socket
+    if (socket) {
+        socket.emit('leave', { room: roomId, username });
+        socket.disconnect();
+        socket = null;
+    }
+
+    // Destroy SFU peer manager (this closes all WebRTC connections)
+    if (peerManager) {
+        peerManager.destroy();
+        peerManager = null;
+    }
+
+    // Stop all media tracks (camera + mic)
+    if (localStream) {
+        localStream.getTracks().forEach(track => {
+            track.stop();
+            track.enabled = false;
+        });
+        localStream = null;
+    }
+
+    // Clear local video element
+    const localVideo = document.getElementById('localVideo');
+    if (localVideo) {
+        localVideo.srcObject = null;
+    }
+
+    // Cleanup audio contexts
+    audioContexts.forEach((ctx) => ctx.audioCtx.close());
+    audioContexts.clear();
+
+    // Reset state
+    peerStates.clear();
+    activeSpeakerSid = null;
+    pinnedSpeakerSid = null;
+    handRaised = false;
+
+    // Switch screens
+    document.getElementById('meetingScreen').classList.remove('active');
+    document.getElementById('preJoinScreen').style.display = 'flex';
 }
 
 // ============================================================
@@ -1149,24 +1399,107 @@ async function initHandLandmarker() {
             numHands: 2
         });
 
-        detectionActive = true;
-        runDetection();
         console.log('✅ MediaPipe HandLandmarker initialized');
     } catch (err) {
         console.error('HandLandmarker init failed:', err);
     }
 }
 
-function runDetection() {
-    if (!detectionActive || !handLandmarker) return;
+function toggleBisindo() {
+    bisindoEnabled = !bisindoEnabled;
+    const btn = document.getElementById('bisindoBtn');
+    btn.classList.toggle('off', !bisindoEnabled);
+    document.getElementById('card_local')?.classList.toggle('bisindo-on', bisindoEnabled);
 
+    // Broadcast our BISINDO state to room
+    socket.emit('bisindo_state', { enabled: bisindoEnabled, username, room: roomId });
+
+    if (bisindoEnabled) {
+        detectionActive = true;
+        runDetection();
+        console.log('BISINDO detection enabled');
+    } else {
+        detectionActive = false;
+        console.log('BISINDO detection disabled');
+    }
+}
+
+// === BISINDO confidence display (set after each prediction) ===
+let lastPrediction = { letter: null, confidence: 0.0, ts: 0 };
+
+function updateConfidenceDisplay(letter, confidence) {
+    const confEl = document.getElementById('bisindoConfidence');
+    if (!confEl) return;
+    if (!letter) {
+        confEl.textContent = '—';
+        confEl.className = '';
+        return;
+    }
+    const pct = Math.round(confidence * 100);
+    confEl.textContent = `${letter} · ${pct}%`;
+    confEl.className = confidence >= 0.7 ? 'high' : confidence >= 0.5 ? 'mid' : 'low';
+}
+
+// === TTS per-peer opt-in (default OFF to avoid audio spam) ===
+let bisindoTTS = false;
+function toggleBisindoTTS() {
+    bisindoTTS = !bisindoTTS;
+    const btn = document.getElementById('bisindoTtsBtn');
+    btn?.classList.toggle('on', bisindoTTS);
+}
+
+let detectionLoopRunning = false;
+
+// ── EVAL INSTRUMENTATION (browser E2E FPS / latency) ──────────────
+// Trigger from DevTools console:  startFpsBench()   (collects 100 frames)
+// Results auto-print mean/median/P95 for per-frame time and derived FPS.
+window.__fpsBench = { active: false, frames: [], target: 100 };
+window.startFpsBench = function (n = 100) {
+    window.__fpsBench = { active: true, frames: [], target: n };
+    console.log(`[fps-bench] collecting ${n} frames... keep a hand in view`);
+};
+function __fpsReport(f) {
+    const s = [...f].sort((a, b) => a - b);
+    const mean = f.reduce((a, b) => a + b, 0) / f.length;
+    const med = s[Math.floor(s.length / 2)];
+    const p95 = s[Math.floor(s.length * 0.95)];
+    const fps = (t) => (1000 / t).toFixed(1);
+    console.log('[fps-bench] ==== END-TO-END PIPELINE (detect + ONNX + UI) ====');
+    console.log(`[fps-bench] frames=${f.length}`);
+    console.log(`[fps-bench] per-frame ms  mean=${mean.toFixed(2)}  median=${med.toFixed(2)}  P95=${p95.toFixed(2)}`);
+    console.log(`[fps-bench] FPS           mean=${fps(mean)}  median=${fps(med)}  P95(worst)=${fps(p95)}`);
+    console.log('[fps-bench] COPY THE THREE LINES ABOVE ^');
+}
+
+function runDetection() {
+    if (!detectionActive || !handLandmarker) {
+        detectionLoopRunning = false;
+        return;
+    }
+
+    detectionLoopRunning = true;
     const localVideo = document.getElementById('localVideo');
     if (localVideo && localVideo.readyState >= 2) {
         videoTs += 33;
+        const __b = window.__fpsBench;
+        const __t0 = __b.active ? performance.now() : 0;
         const results = handLandmarker.detectForVideo(localVideo, videoTs);
         processResults(results);
+        if (__b.active) {
+            __b.frames.push(performance.now() - __t0);
+            if (__b.frames.length >= __b.target) {
+                __b.active = false;
+                __fpsReport(__b.frames);
+            }
+        }
     }
-    requestAnimationFrame(runDetection);
+
+    // Only schedule next frame if still active
+    if (detectionActive) {
+        requestAnimationFrame(runDetection);
+    } else {
+        detectionLoopRunning = false;
+    }
 }
 
 function processResults(results) {
@@ -1219,6 +1552,9 @@ function processResults(results) {
                     const confFill = document.getElementById('confidenceFill');
                     if (predLetter) predLetter.textContent = top.p > 0.5 ? top.letter : '-';
                     if (confFill) confFill.style.width = (top.p * 100) + '%';
+
+                    // Update sidebar confidence display (compact)
+                    updateConfidenceDisplay(top.p > 0.5 ? top.letter : null, top.p);
 
                     if (top.p > 0.5) {
                         prediction = { letter: top.letter, confidence: top.p };
@@ -1292,7 +1628,7 @@ function initSentenceBuilder() {
             const el = document.getElementById('buildingWord');
             if (el) el.textContent = word;
             if (socket && socket.connected) {
-                socket.emit('letter_committed', { room: roomId, username, letter });
+                socket.emit('letter_committed', { room: roomId, username, letter, t_sent: Date.now() });
             }
         },
         onWordComplete: (word, allWords) => {
@@ -1354,7 +1690,22 @@ function speakSentence() {
 }
 
 // Remote sentence handlers
+// EVAL: broadcast latency. Requires sender & receiver clocks roughly synced
+// (same LAN / NTP). window.__bcastLat collects (recv - t_sent) ms samples.
+window.__bcastLat = [];
+window.reportBcastLat = function () {
+    const f = window.__bcastLat;
+    if (!f.length) { console.log('[bcast-lat] no samples yet'); return; }
+    const s = [...f].sort((a, b) => a - b);
+    const mean = f.reduce((a, b) => a + b, 0) / f.length;
+    console.log('[bcast-lat] ==== emit -> remote render latency (ms) ====');
+    console.log(`[bcast-lat] n=${f.length} mean=${mean.toFixed(1)} median=${s[Math.floor(s.length/2)].toFixed(1)} P95=${s[Math.floor(s.length*0.95)].toFixed(1)} min=${s[0].toFixed(1)} max=${s[s.length-1].toFixed(1)}`);
+    console.log('[bcast-lat] COPY THE LINE ABOVE ^  (note: clock-sync dependent)');
+};
 function handleRemoteLetter(data) {
+    if (typeof data.t_sent === 'number') {
+        window.__bcastLat.push(Date.now() - data.t_sent);
+    }
     addChatMessage(data.username, `[letter] ${data.letter}`);
 }
 
@@ -1376,3 +1727,15 @@ function handleRemoteSentence(data) {
         speechSynthesis.speak(utterance);
     }
 }
+
+
+// Prevent ghost user after refresh: tell server we leave on unload
+window.addEventListener('beforeunload', () => {
+    try {
+        if (socket && socket.connected && roomId) {
+            socket.emit('leave', { room: roomId, username });
+            // Also disconnect quickly to trigger server cleanup
+            socket.disconnect();
+        }
+    } catch(_){}
+});

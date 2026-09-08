@@ -1,23 +1,27 @@
 // ICE Server configuration for WebRTC
-// Get free TURN credentials from Cloudflare Calls (zero cost)
+//
+// STUN (Google) — basic NAT traversal (no media relay).
+// TURN (Metered openrelay, free public) — CGNAT / campus WiFi / cross-network.
+// meeting.js may also append servers from /api/turn when the server sets env vars.
 
 const ICE_SERVERS = [
-    // Google public STUN (always works for basic NAT traversal)
     { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
 
-    // Cloudflare TURN (free tier)
-    // 1. Go to https://dash.cloudflare.com
-    // 2. Workers & Pages → Calls
-    // 3. Create TURN credentials
-    // 4. Replace the placeholder values below
+    // Public free TURN — https://www.metered.ca/tools/openrelay/
     {
-        urls: 'turn:turn.cloudflare.com:3478?transport=udp',
-        username: 'YOUR_CLOUDFLARE_TURN_USERNAME',
-        credential: 'YOUR_CLOUDFLARE_TURN_CREDENTIAL'
+        urls: 'turn:openrelay.metered.ca:80',
+        username: 'openrelayproject',
+        credential: 'openrelayproject',
     },
     {
-        urls: 'turn:turn.cloudflare.com:3478?transport=tcp',
-        username: 'YOUR_CLOUDFLARE_TURN_USERNAME',
-        credential: 'YOUR_CLOUDFLARE_TURN_CREDENTIAL'
-    }
+        urls: 'turn:openrelay.metered.ca:443',
+        username: 'openrelayproject',
+        credential: 'openrelayproject',
+    },
+    {
+        urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+        username: 'openrelayproject',
+        credential: 'openrelayproject',
+    },
 ];
